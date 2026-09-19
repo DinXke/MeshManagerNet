@@ -5,6 +5,37 @@
  * verschenen is. Met opzet niet herschreven: een release die nooit bestaan
  * heeft, hoort niet in een changelog te staan.
  *
+ * 2.11.6 Een failover hoort iemand wakker te maken. Deze node stuurt nu een kort
+ *        tekstbericht naar een contact uit zijn eigen ACL zodra hij het
+ *        repeteren overneemt, en opnieuw als hij het teruggeeft -- "hij is weer
+ *        terug" is evenveel waard als "hij is weg". Bestemming is een
+ *        pubkey-prefix: 'openhop melding <hex>', 'openhop melding test' stuurt
+ *        er meteen een, 'openhop melding uit' zet het af. Standaard uit.
+ *
+ * 2.11.5 De brug gooide elk RX-frame weg. De drempel uit 2.11.2 stond op
+ *        availableForWrite(), maar die bestaat niet in deze Arduino-ESP32-kern:
+ *        WiFiClient erft hem van Client en dat is een vaste 0. Gemeten gevolg:
+ *        rx 0, "buffer vol 18", een daemon die niets hoorde en dus ook geen
+ *        repeater meer in de lucht. Tweede fout in dezelfde hoek: setTimeout()
+ *        rekent in MILLIseconden, dus de bedoelde twee seconden waren 2 ms. Nu
+ *        schrijft de brug met een echte grens van 2000 ms en blijft de
+ *        bescherming waar ze hoort -- de stilstand-teller in flushRx().
+ *
+ * 2.11.4 De drempel hoort bij de pakketstroom, niet bij de antwoorden. Door hem
+ *        ook op de PONG te leggen kwam hun driver niet eens tot een verbinding
+ *        ("Reconnect: PING failed"). Antwoorden zijn klein, zeldzaam en nodig.
+ *
+ * 2.11.3 Niet blijven duwen tegen een socket die niets aanneemt: het kopframe
+ *        bleef staan en elke lus probeerde het opnieuw, wat een teller van 6087
+ *        POGINGEN per minuut opleverde en een ring die nooit leegliep. Nu: na
+ *        vijf seconden stilstand de ring weg met EEN verlies per frame geteld,
+ *        en na dertig seconden de verbinding loslaten zodat de gast schoon kan
+ *        terugkomen -- meteen het signaal waar de failover op wacht.
+ *
+ * 2.11.2 Een gast mag zendtijd kosten, geen hoofdlus. WiFiClient::write() wacht
+ *        tot de bytes weg kunnen; las de host even niet, dan stond deze
+ *        repeater stil. (De gekozen oplossing deugde niet; zie 2.11.5.)
+ *
  * 2.11.1 De failover zag een VERBONDEN maar stille host aan voor een dode. Hun
  *        driver praat alleen als er iets te zeggen is, dus een host die
  *        luistert is gewoon stil -- en die was na een minuut volgens mij weg.

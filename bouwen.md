@@ -88,3 +88,21 @@ ver                 -> MeshManager (by DinX) v2.11.1 - MeshCore v1.17.0
 openhop             -> stand van de brug
 wifi                -> netwerkstand
 ```
+
+## De melding bij failover
+
+Zodra deze node het repeteren overneemt omdat openHop wegviel, stuurt hij een
+kort tekstbericht — en nog eens één als hij het teruggeeft. De bestemming moet
+een contact zijn dat al in de ACL van deze repeater staat (je companion logt daar
+op in, dus de sleutel en het gedeelde geheim zijn er al):
+
+```
+openhop melding 2cb0c5eb          -> zet de bestemming (begin van de pubkey, max 8 bytes)
+openhop melding test              -> stuurt er nu één, zodat je het ziet werken
+openhop melding                   -> toont wat er staat
+openhop melding uit               -> af
+```
+
+Standaard staat het uit. Kent deze node die sleutel niet, dan zegt `test` dat
+meteen in plaats van stil te falen — log met je companion één keer in op de
+repeater en probeer opnieuw.

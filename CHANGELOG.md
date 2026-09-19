@@ -3,6 +3,11 @@
 De volledige toelichting per versie staat in de kop van
 `src/MeshManagerNet.cpp`; dit is de korte lijst.
 
+- **2.11.6** - Een failover hoort iemand wakker te maken: melding naar je companion
+- **2.11.5** - De brug gooide elk RX-frame weg; availableForWrite() bestaat hier niet
+- **2.11.4** - De drempel hoort bij de pakketstroom, niet bij de antwoorden (PONG)
+- **2.11.3** - Niet blijven duwen tegen een socket die niets aanneemt
+- **2.11.2** - Een gast mag zendtijd kosten, geen hoofdlus (deugde niet; zie 2.11.5)
 - **2.11.1** - De failover zag een VERBONDEN maar stille host aan voor een dode. Hun
 - **2.11.0** - De openHop-brug: deze node als radio voor een openHop-daemon, zonder
 - **2.10.0** - Twee dingen die dezelfde denkfout rechtzetten: een filter op de

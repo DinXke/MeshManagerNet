@@ -1,5 +1,5 @@
 diff --git a/examples/simple_repeater/MyMesh.cpp b/examples/simple_repeater/MyMesh.cpp
-index c93ba1a4..294c4781 100644
+index c93ba1a4..8a8121ba 100644
 --- a/examples/simple_repeater/MyMesh.cpp
 +++ b/examples/simple_repeater/MyMesh.cpp
 @@ -1,6 +1,11 @@
@@ -23,7 +23,7 @@ index c93ba1a4..294c4781 100644
  #if MAX_NEIGHBOURS // check if neighbours enabled
    // find existing neighbour, else use least recently updated
    uint32_t oldest_timestamp = 0xFFFFFFFF;
-@@ -84,7 +89,205 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
+@@ -84,9 +89,237 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
    neighbour->advert_timestamp = timestamp;
    neighbour->heard_timestamp = getRTCClock()->getCurrentTime();
    neighbour->snr = (int8_t)(snr * 4);
@@ -42,9 +42,9 @@ index c93ba1a4..294c4781 100644
 +  return n;
 +#else
 +  return 0;
-+#endif
-+}
-+
+ #endif
+ }
+ 
 +bool MyMesh::getNeighbourAt(int idx, char *pub_hex, char *name_out, size_t name_max,
 +                            uint32_t *secs_ago, int8_t *snr_out) const {
 +#if MAX_NEIGHBOURS
@@ -61,7 +61,7 @@ index c93ba1a4..294c4781 100644
 +    *snr_out = nb->snr;
 +    return true;
 +  }
- #endif
++#endif
 +  return false;
 +}
 +
@@ -117,6 +117,36 @@ index c93ba1a4..294c4781 100644
 +  } else {
 +    sendDirect(pkt, m.out_path, m.out_path_len);
 +  }
++}
++
++/* Melding naar een contact dat hier al inlogt. Zelfde opbouw als elk ander
++ * tekstbericht van deze firmware: vier bytes tijdstempel, een byte soort, dan
++ * de tekst. TXT_TYPE_PLAIN en niet CLI_DATA -- dit is voor een mens. */
++bool MyMesh::ohSendAlert(const uint8_t *pfx, int plen, const char *tekst) {
++  if (pfx == NULL || plen <= 0 || tekst == NULL) return false;
++  ClientInfo *c = acl.getClient(pfx, plen);
++  if (c == NULL) return false;
++
++  uint8_t temp[5 + 140];
++  uint32_t now = getRTCClock()->getCurrentTimeUnique();
++  memcpy(temp, &now, 4);
++  temp[4] = (TXT_TYPE_PLAIN << 2);
++  size_t len = strlen(tekst);
++  if (len > 140) len = 140;
++  memcpy(&temp[5], tekst, len);
++
++  mesh::Packet *pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, c->id, c->shared_secret,
++                                     temp, 5 + len);
++  if (!pkt) return false;
++
++  /* Kennen we de weg terug, dan direct; anders flood. Een melding die het
++   * zenden waard is, is de flood waard. */
++  if (c->out_path_len == OUT_PATH_UNKNOWN) {
++    sendFloodScoped(default_scope, pkt, 0, _prefs.path_hash_mode + 1);
++  } else {
++    sendDirect(pkt, c->out_path, c->out_path_len);
++  }
++  return true;
 +}
 +
 +bool MyMesh::sendMonitorLogin(int idx, const char *password) {
@@ -226,10 +256,12 @@ index c93ba1a4..294c4781 100644
 +  if (!pkt) return false;
 +  sendToMonitor(m, pkt);
 +  return true;
- }
- 
++}
++
  uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood) {
-@@ -448,6 +651,54 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
+   ClientInfo* client = NULL;
+   if (data[0] == 0) {   // blank password, just check if sender is in ACL
+@@ -448,6 +681,54 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
        return false;
      }
    }
@@ -284,7 +316,7 @@ index c93ba1a4..294c4781 100644
    return true;
  }
  
-@@ -467,6 +718,57 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+@@ -467,6 +748,57 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
    mesh::Utils::printHex(Serial, raw, len);
    Serial.println();
  #endif
@@ -342,7 +374,7 @@ index c93ba1a4..294c4781 100644
  }
  
  void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
-@@ -608,12 +910,23 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
+@@ -608,12 +940,23 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
        matching_peer_indexes[n++] = i; // store the INDEXES of matching contacts (for subsequent 'peer' methods)
      }
    }
@@ -367,7 +399,7 @@ index c93ba1a4..294c4781 100644
      // lookup pre-calculated shared_secret
      memcpy(dest_secret, acl.getClientByIdx(i)->shared_secret, PUB_KEY_SIZE);
    } else {
-@@ -621,6 +934,20 @@ void MyMesh::getPeerSharedSecret(uint8_t *dest_secret, int peer_idx) {
+@@ -621,6 +964,20 @@ void MyMesh::getPeerSharedSecret(uint8_t *dest_secret, int peer_idx) {
    }
  }
  
@@ -388,7 +420,7 @@ index c93ba1a4..294c4781 100644
  static bool isShare(const mesh::Packet *packet) {
    if (packet->hasTransportCodes()) {
      return packet->transport_codes[0] == 0 && packet->transport_codes[1] == 0;  // codes { 0, 0 } means 'send to nowhere'
-@@ -632,11 +959,22 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
+@@ -632,11 +989,22 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
                            const uint8_t *app_data, size_t app_data_len) {
    mesh::Mesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len); // chain to super impl
  
@@ -413,7 +445,7 @@ index c93ba1a4..294c4781 100644
      }
    }
  }
-@@ -644,6 +982,10 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
+@@ -644,6 +1012,10 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
  void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, const uint8_t *secret,
                              uint8_t *data, size_t len) {
    int i = matching_peer_indexes[sender_idx];
@@ -424,7 +456,7 @@ index c93ba1a4..294c4781 100644
    if (i < 0 || i >= acl.getNumClients()) { // get from our known_clients table (sender SHOULD already be known in this context)
      MESH_DEBUG_PRINTLN("onPeerDataRecv: invalid peer idx: %d", i);
      return;
-@@ -749,6 +1091,20 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t
+@@ -749,6 +1121,20 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t
    // TODO: prevent replay attacks
    int i = matching_peer_indexes[sender_idx];
  
@@ -445,7 +477,7 @@ index c93ba1a4..294c4781 100644
    if (i >= 0 && i < acl.getNumClients()) { // get from our known_clients table (sender SHOULD already be known in this context)
      MESH_DEBUG_PRINTLN("PATH to client, path_len=%d", (uint32_t)path_len);
      auto client = acl.getClientByIdx(i);
-@@ -819,7 +1175,8 @@ void MyMesh::onControlDataRecv(mesh::Packet* packet) {
+@@ -819,7 +1205,8 @@ void MyMesh::onControlDataRecv(mesh::Packet* packet) {
      if (id.matches(self_id)) {
        return;
      }
@@ -455,7 +487,7 @@ index c93ba1a4..294c4781 100644
    }
  }
  
-@@ -866,6 +1223,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
+@@ -866,6 +1253,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
  #if MAX_NEIGHBOURS
    memset(neighbours, 0, sizeof(neighbours));
  #endif
@@ -464,7 +496,7 @@ index c93ba1a4..294c4781 100644
  
    // defaults
    _prefs.airtime_factor = 1.0;
-@@ -912,7 +1271,13 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
+@@ -912,7 +1301,13 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
    _prefs.rx_boosted_gain = 1; // enabled by default;
  #endif
  #endif
@@ -479,7 +511,7 @@ index c93ba1a4..294c4781 100644
  
    pending_discover_tag = 0;
    pending_discover_until = 0;
-@@ -1140,6 +1505,218 @@ void MyMesh::onDefaultRegionChanged(const RegionEntry* r) {
+@@ -1140,6 +1535,218 @@ void MyMesh::onDefaultRegionChanged(const RegionEntry* r) {
    }
  }
  
@@ -698,7 +730,7 @@ index c93ba1a4..294c4781 100644
  void MyMesh::formatStatsReply(char *reply) {
    StatsFormatHelper::formatCoreStats(reply, board, *_ms, _err_flags, _mgr);
  }
-@@ -1215,6 +1792,13 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
+@@ -1215,6 +1822,13 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
      command += 3;
    }
  
@@ -713,7 +745,7 @@ index c93ba1a4..294c4781 100644
    if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
      char* hex = &command[8];
 diff --git a/examples/simple_repeater/MyMesh.h b/examples/simple_repeater/MyMesh.h
-index 2f923c87..1f5ed00a 100644
+index 2f923c87..2556a349 100644
 --- a/examples/simple_repeater/MyMesh.h
 +++ b/examples/simple_repeater/MyMesh.h
 @@ -67,8 +67,41 @@ struct NeighbourInfo {
@@ -780,7 +812,7 @@ index 2f923c87..1f5ed00a 100644
    uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
    uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
    uint8_t handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
-@@ -191,6 +229,24 @@ public:
+@@ -191,6 +229,28 @@ public:
      return &_prefs;
    }
  
@@ -801,11 +833,15 @@ index 2f923c87..1f5ed00a 100644
 +  float ohLastSnr() const;
 +  bool  ohRadioBusy() const;
 +  bool  ohInjectRaw(const uint8_t* raw, int len, uint32_t* airtime_ms_out);
++  /* Stuurt een kort tekstbericht naar een contact uit de ACL, gezocht op de
++   * eerste plen bytes van zijn publieke sleutel. Bedoeld voor de melding bij
++   * failover; false = die sleutel kent deze node niet (of geen pakket vrij). */
++  bool  ohSendAlert(const uint8_t* pfx, int plen, const char* tekst);
 +
    void savePrefs() override {
      _cli.savePrefs(_fs);
    }
-@@ -229,6 +285,61 @@ public:
+@@ -229,6 +289,61 @@ public:
    void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
    void loop();
  

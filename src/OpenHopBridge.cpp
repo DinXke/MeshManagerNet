@@ -11,6 +11,9 @@
 #define OHB_TOKEN_MAX     33
 #define OHB_MAX_PAYLOAD   264
 #define OHB_RX_RING       6
+/* Zolang de host niets aanneemt: na dit stilstaan de ring weggooien, en na
+ * zes keer zo lang de verbinding loslaten. */
+#define OHB_STALL_DROP_MS 5000UL
 /* Failover: hoe lang de gast weg moet zijn voordat wij het repeteren
  * overnemen, en hoe lang hij terug moet zijn voordat we het teruggeven. Een
  * wifi-hik van een paar tellen hoort geen omschakeling te worden. */
@@ -82,6 +85,14 @@ static uint16_t   _rx_len[OHB_RX_RING];
 static uint8_t    _rx_head = 0, _rx_count = 0;
 
 static uint32_t   _n_rx = 0, _n_rx_drop = 0, _n_tx = 0, _n_tx_ref = 0, _n_fo = 0;
+static uint32_t   _n_sock_full = 0;   /* frames gevallen: zendbuffer vol */
+static unsigned long _stall_since = 0;
+/* Bestemming van de failovermelding: begin van een publieke sleutel, leeg =
+ * geen melding. Acht bytes is ruim genoeg om uniek te zijn en past in de
+ * configuratieregel. */
+#define OHB_MELD_MAX      8
+static uint8_t    _meld[OHB_MELD_MAX];
+static uint8_t    _meld_len = 0;
 static unsigned long _guest_seen = 0, _guest_back = 0, _guest_gone = 0;
 static bool       _fo_taken = false;
 static char       _note[80] = "uit";
@@ -96,8 +107,21 @@ static uint16_t crc16(const uint8_t* d, size_t n, uint16_t crc = 0xFFFF) {
   return crc;
 }
 
-static bool sendFrame(uint8_t cmd, const uint8_t* payload, size_t len) {
+/* alleen_als_plaats: voor de RX-stroom. Antwoorden moeten er gewoon uit --
+ * zonder PONG komt hun driver niet eens tot een verbinding. */
+static bool sendFrame(uint8_t cmd, const uint8_t* payload, size_t len,
+                      bool alleen_als_plaats = false) {
   if (!_cl.connected()) return false;
+
+  /* EEN GAST MAG ZENDTIJD KOSTEN, GEEN HOOFDLUS. WiFiClient::write() wacht tot
+   * de bytes weg kunnen; leest de host even niet, dan staat deze repeater stil.
+   * Dus alleen schrijven als er NU plaats is, en anders het frame laten vallen
+   * en dat tellen. */
+  /* GEEN availableForWrite(): die bestaat in deze kern niet en geeft 0, dus
+   * daarop drempelen gooide elk RX-frame weg. De grens zit in de tijd: de
+   * socket-timeout staat op twee seconden, en een host die structureel niets
+   * aanneemt wordt opgevangen door de stilstand-teller in flushRx(). */
+  (void)alleen_als_plaats;
   uint8_t hdr[4] = { OH_SYNC, cmd, (uint8_t)(len & 0xFF), (uint8_t)((len >> 8) & 0xFF) };
   uint16_t crc = crc16(&hdr[1], 3);
   if (payload && len) crc = crc16(payload, len, crc);
@@ -109,6 +133,43 @@ static bool sendFrame(uint8_t cmd, const uint8_t* payload, size_t len) {
 
 static void sendErr(uint8_t code) { sendFrame(OH_CMD_ERROR, &code, 1); }
 
+/* Hex in, bytes uit. Een lege of onleesbare tekst betekent: geen melding. */
+static bool ohbMeldZet(const char* hex) {
+  _meld_len = 0;
+  if (hex == nullptr) return true;
+  size_t n = strlen(hex);
+  if (n == 0 || strcmp(hex, "uit") == 0) return true;
+  if ((n % 2) != 0 || n > OHB_MELD_MAX * 2) return false;
+  for (size_t i = 0; i < n; i += 2) {
+    char b[3] = { hex[i], hex[i + 1], 0 };
+    char* eind = nullptr;
+    long v = strtol(b, &eind, 16);
+    if (eind != b + 2) { _meld_len = 0; return false; }
+    _meld[i / 2] = (uint8_t)v;
+  }
+  _meld_len = (uint8_t)(n / 2);
+  return true;
+}
+
+static void ohbMeldHex(char* uit, size_t max) {
+  if (max == 0) return;
+  uit[0] = 0;
+  for (uint8_t i = 0; i < _meld_len && (size_t)(i * 2 + 3) <= max; i++) {
+    snprintf(&uit[i * 2], max - i * 2, "%02x", _meld[i]);
+  }
+}
+
+/* Eén melding de lucht in. Stil als er geen bestemming staat -- dat is de
+ * standaard, en iemand die geen melding instelde wil er ook geen. */
+static void ohbMeld(const char* tekst) {
+  if (_meld_len == 0 || _mesh == nullptr) return;
+  if (_mesh->ohSendAlert(_meld, _meld_len, tekst)) {
+    OHB_LOG("melding verstuurd: %s", tekst);
+  } else {
+    OHB_LOG("melding NIET verstuurd (sleutel onbekend of pool vol): %s", tekst);
+  }
+}
+
 // ------------------------------------------------------------- persistentie
 static void saveCfg() {
   if (_fs == nullptr) return;
@@ -116,6 +177,8 @@ static void saveCfg() {
   if (!f) return;
   f.printf("%d\n%u\n%s\n%d\n%u\n", _on ? 1 : 0, (unsigned)_port, _token,
            _fo_on ? 1 : 0, (unsigned)_fo_hold);
+  for (uint8_t i = 0; i < _meld_len; i++) f.printf("%02x", _meld[i]);
+  f.print('\n');
   f.close();
 }
 
@@ -127,7 +190,7 @@ static void loadCfg() {
   int n = 0;
   /* Een ontbrekende regel laat de standaardwaarde staan: zo blijft een bestand
    * van een oudere versie leesbaar. */
-  while (f.available() && n < 5) {
+  while (f.available() && n < 6) {
     size_t len = 0;
     while (f.available() && len < sizeof(line) - 1) {
       int ch = f.read();
@@ -141,7 +204,8 @@ static void loadCfg() {
     else if (n == 1) { if (v >= 1 && v <= 65535) _port = (uint16_t)v; }
     else if (n == 2) { strncpy(_token, line, sizeof(_token) - 1); _token[sizeof(_token)-1] = 0; }
     else if (n == 3) _fo_on = (line[0] == '1');
-    else if (v >= OHB_FO_HOLD_MIN && v <= OHB_FO_HOLD_MAX) _fo_hold = (uint16_t)v;
+    else if (n == 4) { if (v >= OHB_FO_HOLD_MIN && v <= OHB_FO_HOLD_MAX) _fo_hold = (uint16_t)v; }
+    else ohbMeldZet(line);   // regel 6: bestemming van de melding, hex
     n++;
   }
   f.close();
@@ -195,11 +259,25 @@ void ohb_on_raw_rx(float snr, float rssi, const uint8_t raw[], int len) {
 
 static void flushRx() {
   while (_rx_count > 0) {
-    if (!sendFrame(OH_CMD_RX_PACKET, _rx[_rx_head], _rx_len[_rx_head])) return;
+    if (!sendFrame(OH_CMD_RX_PACKET, _rx[_rx_head], _rx_len[_rx_head], true)) {
+      /* Niet blijven duwen: anders wacht de hele ring op een frame dat er nu
+       * niet in gaat. */
+      const unsigned long nu = millis();
+      if (_stall_since == 0) { _stall_since = nu; return; }
+      if (nu - _stall_since < OHB_STALL_DROP_MS) return;
+      _n_rx_drop += _rx_count;          // EEN verlies per frame, geen pogingen
+      _rx_head = _rx_count = 0;
+      if (nu - _stall_since >= OHB_STALL_DROP_MS * 6) {
+        dropClient("host neemt niets meer aan");
+      }
+      return;
+    }
+    _stall_since = 0;
     _rx_head = (uint8_t)((_rx_head + 1) % OHB_RX_RING);
     _rx_count--;
     _n_rx++;
   }
+  _stall_since = 0;
 }
 
 // ----------------------------------------------------------------- commando's
@@ -385,6 +463,7 @@ static void failoverTick() {
     _n_fo++;
     snprintf(_note, sizeof(_note), "FAILOVER: gast weg, deze node repeteert zelf");
     OHB_LOG("%s (na %u s stilte)", _note, (unsigned)_fo_hold);
+    ohbMeld("openHop weg - dakrepeater repeteert nu zelf");
     return;
   }
   if (levend && _fo_taken && (nu - _guest_back) >= hold) {
@@ -392,6 +471,7 @@ static void failoverTick() {
     _fo_taken = false;
     snprintf(_note, sizeof(_note), "gast terug; repeteren weer aan openHop");
     OHB_LOG("%s", _note);
+    ohbMeld("openHop terug - dakrepeater geeft het repeteren terug");
   }
 }
 
@@ -416,6 +496,7 @@ void ohb_loop() {
     if (_cl.connected()) dropClient("nieuwe host meldt zich");
     _cl = nieuw;
     _cl.setNoDelay(true);
+    _cl.setTimeout(2000);   // milliseconden in deze kern; vangnet tegen hangen
     _in_len = 0;
     _authed = (_token[0] == 0);
     _guest_seen = millis();
@@ -434,12 +515,14 @@ void ohb_loop() {
 // --------------------------------------------------------------------- CLI
 void ohb_status_line(char* out, size_t cap) {
   snprintf(out, cap,
-           "openhop %s poort %u token %s host %s rx %lu tx %lu (geweigerd %lu) "
-           "failover %s%s repeat %s",
+           "openhop %s poort %u token %s host %s rx %lu tx %lu (geweigerd %lu, "
+           "buffer vol %lu) failover %s%s melding %s repeat %s",
            _on ? "aan" : "uit", (unsigned)_port, _token[0] ? "gezet" : "leeg",
            _cl.connected() ? _client_ip : "geen",
            (unsigned long)_n_rx, (unsigned long)_n_tx, (unsigned long)_n_tx_ref,
+           (unsigned long)_n_sock_full,
            _fo_on ? "aan" : "uit", _fo_taken ? " (OVERGENOMEN)" : "",
+           _meld_len ? "aan" : "uit",
            (_mesh && _mesh->ohForwarding()) ? "on" : "off");
 }
 
@@ -480,6 +563,30 @@ bool ohb_handle_command(const char* command, char* reply) {
     /* Een lopende sessie is aangegaan onder de oude regels. */
     dropClient("token gewijzigd");
     snprintf(reply, 155, "OK - token %s", _token[0] ? "gezet" : "gewist");
+    return true;
+  }
+  if (memcmp(p, "melding", 7) == 0) {
+    const char* t = p + 7;
+    while (*t == ' ') t++;
+    if (*t == 0) {                       /* tonen wat er staat */
+      char hex[OHB_MELD_MAX * 2 + 1];
+      ohbMeldHex(hex, sizeof(hex));
+      snprintf(reply, 155, "melding %s", _meld_len ? hex : "uit");
+      return true;
+    }
+    if (strcmp(t, "test") == 0) {        /* nu sturen, zodat je het ziet werken */
+      if (_meld_len == 0) { strcpy(reply, "Err - geen bestemming ingesteld"); return true; }
+      bool ok = _mesh && _mesh->ohSendAlert(_meld, _meld_len,
+                                            "test vanaf de dakrepeater");
+      snprintf(reply, 155, ok ? "OK - test verstuurd"
+                              : "Err - sleutel onbekend op deze node");
+      return true;
+    }
+    if (!ohbMeldZet(t)) { strcpy(reply, "Err - hex, max 8 bytes, of 'uit'"); return true; }
+    saveCfg();
+    char hex[OHB_MELD_MAX * 2 + 1];
+    ohbMeldHex(hex, sizeof(hex));
+    snprintf(reply, 155, "OK - melding %s", _meld_len ? hex : "uit");
     return true;
   }
   if (memcmp(p, "failover", 8) == 0) {
