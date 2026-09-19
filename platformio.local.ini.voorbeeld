@@ -1,0 +1,74 @@
+; ---------------------------------------------------------------------------
+; VOORBEELD. Kopieer dit naar `platformio.local.ini` in je MeshCore-checkout en
+; vul je eigen gegevens in. Dit bestand hoort GEEN echte wachtwoorden te
+; bevatten -- de echte staat alleen op je eigen machine.
+; ---------------------------------------------------------------------------
+; Repeater met MeshStatsNet: WiFi, beheerpagina, OTA over het gewone netwerk en
+; een console. De credentials staan hier ingebouwd zodat de eerste OTA-flash
+; meteen op het netwerk komt; nadien zijn ze via de beheerpagina te wijzigen.
+; DIT BESTAND NOOIT COMMITTEN.
+[env:heltec_v4_repeater_meshmanager]
+extends = heltec_v4_oled
+build_flags =
+  ${heltec_v4_oled.build_flags}
+  -D DISPLAY_CLASS=SSD1306Display
+  -D ADVERT_NAME='"Heltec Repeater"'
+  -D ADVERT_LAT=0.0
+  -D ADVERT_LON=0.0
+  -D ADMIN_PASSWORD='"kies-een-wachtwoord"'
+  -D MAX_NEIGHBOURS=50
+  ; De FEM-versterker overstuurt bij een sterk signaal; deze node staat hoog en
+  ; met vrij zicht, en hoort meer zonder.
+  -D RADIO_FEM_RXGAIN_DEFAULT=0
+  -D MESHMANAGER_NET=1
+  ; Vereist sinds 2.9.0; zie docs/firmware-upgrade.md. De node vergelijkt
+  ; deze string bij een upgrade, dus de env-naam moet kloppen met wat er
+  ; draait -- vandaar ook de hernoeming van meshstats naar meshmanager.
+  -D MESHMANAGER_ENV='"$PIOENV"'
+  ; DISABLE_WIFI_OTA bewust NIET gezet: zolang onze module draait vangt zij
+  ; 'start ota' af (er staat al een webserver op poort 80), maar schakelt zij
+  ; zichzelf uit na herhaalde herstarts, dan werkt de standaard-OTA weer.
+  -D WIFI_SSID='"JOUW-WIFI"'
+  -D WIFI_PWD='"JOUW-WIFI-WACHTWOORD"'
+build_src_filter = ${heltec_v4_oled.build_src_filter}
+  +<helpers/ui/SSD1306Display.cpp>
+  +<../examples/simple_repeater>
+lib_deps =
+  ${heltec_v4_oled.lib_deps}
+  ${esp32_ota.lib_deps}
+  bakercp/CRC32 @ ^2.0.0
+  knolleary/PubSubClient @ ^2.8
+
+[env:Heltec_v3_wifi_home]
+extends = Heltec_lora32_v3
+build_flags =
+  ${Heltec_lora32_v3.build_flags}
+  -I examples/companion_radio/ui-new
+  ; Een contactplaats kost ~316 bytes statisch RAM, en op 350 bleef er nog maar
+  ; 22 kB heap over -- te weinig voor lwip om zijn buffers rond te krijgen,
+  ; waardoor de webserver halve antwoorden schreef en clients bleven hangen.
+  ; 260 geeft ~50 kB heap en houdt ruim 40 plaatsen boven het huidige aantal
+  ; nodes in de lucht.
+  -D MAX_CONTACTS=260
+  -D MAX_GROUP_CHANNELS=40
+  -D DISPLAY_CLASS=SSD1306Display
+  -D WIFI_DEBUG_LOGGING=1
+  -D BLE_DEBUG_LOGGING=1
+  -D OFFLINE_QUEUE_SIZE=256
+  -D LORA_SF=8
+  -D LORA_CR=8
+  -D TCP_PORT=5000
+  -D WIFI_SSID='"JOUW-WIFI"'
+  -D WIFI_PWD='"JOUW-WIFI-WACHTWOORD"'
+  -D BLE_PIN_CODE=123456
+build_src_filter = ${Heltec_lora32_v3.build_src_filter}
+  +<helpers/ui/SSD1306Display.cpp>
+  +<helpers/ui/MomentaryButton.cpp>
+  +<helpers/esp32/*.cpp>
+  +<../examples/companion_radio/*.cpp>
+  +<../examples/companion_radio/ui-new/*.cpp>
+lib_deps =
+  ${Heltec_lora32_v3.lib_deps}
+  densaugeo/base64 @ ~1.4.0
+  WebServer
+  knolleary/PubSubClient @ ^2.8

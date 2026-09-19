@@ -1,0 +1,4 @@
+.pio/
+platformio.local.ini
+*.bak-*
+.vscode/
