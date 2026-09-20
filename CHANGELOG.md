@@ -3,6 +3,7 @@
 De volledige toelichting per versie staat in de kop van
 `src/MeshManagerNet.cpp`; dit is de korte lijst.
 
+- **2.12.0** - Verbonden is niet hetzelfde als repeterend: failover op zendverzoeken
 - **2.11.6** - Een failover hoort iemand wakker te maken: melding naar je companion
 - **2.11.5** - De brug gooide elk RX-frame weg; availableForWrite() bestaat hier niet
 - **2.11.4** - De drempel hoort bij de pakketstroom, niet bij de antwoorden (PONG)

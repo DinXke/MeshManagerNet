@@ -5,6 +5,16 @@
  * verschenen is. Met opzet niet herschreven: een release die nooit bestaan
  * heeft, hoort niet in een changelog te staan.
  *
+ * 2.12.0 Een verbinding is geen bewijs dat er nog gerepeteerd wordt. De failover
+ *        vroeg alleen of openHop verbonden was; op 20 september 2026 was dat de
+ *        hele tijd ja terwijl er niets de lucht in ging, omdat zijn andere kop
+ *        van het netwerk was en bridge-stand alles daarheen stuurt. Gemeten: 85
+ *        pakketten binnen per tien minuten, 182 mislukte zendpogingen per uur,
+ *        nul geslaagde. Nu telt ook of er nog zendverzoeken binnenkomen --
+ *        'openhop droogte <sec|uit>', standaard 600 s en pas na twintig
+ *        aangereikte pakketten. Uitzetten bij tx_mode default/sticky: daar kan
+ *        een tweede kop terecht nooit iets te zenden krijgen.
+ *
  * 2.11.6 Een failover hoort iemand wakker te maken. Deze node stuurt nu een kort
  *        tekstbericht naar een contact uit zijn eigen ACL zodra hij het
  *        repeteren overneemt, en opnieuw als hij het teruggeeft -- "hij is weer

@@ -14,6 +14,11 @@
 /* Zolang de host niets aanneemt: na dit stilstaan de ring weggooien, en na
  * zes keer zo lang de verbinding loslaten. */
 #define OHB_STALL_DROP_MS 5000UL
+/* DROOGTE: verbonden maar niets meer zenden. Zie de failover verderop. */
+#define OHB_DROOGTE_DEFAULT_S  600
+#define OHB_DROOGTE_MIN_S       60
+#define OHB_DROOGTE_MAX_S     7200
+#define OHB_DROOGTE_MIN_RX      20
 /* Failover: hoe lang de gast weg moet zijn voordat wij het repeteren
  * overnemen, en hoe lang hij terug moet zijn voordat we het teruggeven. Een
  * wifi-hik van een paar tellen hoort geen omschakeling te worden. */
@@ -87,6 +92,9 @@ static uint8_t    _rx_head = 0, _rx_count = 0;
 static uint32_t   _n_rx = 0, _n_rx_drop = 0, _n_tx = 0, _n_tx_ref = 0, _n_fo = 0;
 static uint32_t   _n_sock_full = 0;   /* frames gevallen: zendbuffer vol */
 static unsigned long _stall_since = 0;
+static uint16_t      _droogte_s = OHB_DROOGTE_DEFAULT_S;   // 0 = uit
+static unsigned long _laatste_tx = 0;
+static uint32_t      _rx_sinds_tx = 0;
 /* Bestemming van de failovermelding: begin van een publieke sleutel, leeg =
  * geen melding. Acht bytes is ruim genoeg om uniek te zijn en past in de
  * configuratieregel. */
@@ -178,7 +186,7 @@ static void saveCfg() {
   f.printf("%d\n%u\n%s\n%d\n%u\n", _on ? 1 : 0, (unsigned)_port, _token,
            _fo_on ? 1 : 0, (unsigned)_fo_hold);
   for (uint8_t i = 0; i < _meld_len; i++) f.printf("%02x", _meld[i]);
-  f.print('\n');
+  f.printf("\n%u\n", (unsigned)_droogte_s);
   f.close();
 }
 
@@ -190,7 +198,7 @@ static void loadCfg() {
   int n = 0;
   /* Een ontbrekende regel laat de standaardwaarde staan: zo blijft een bestand
    * van een oudere versie leesbaar. */
-  while (f.available() && n < 6) {
+  while (f.available() && n < 7) {
     size_t len = 0;
     while (f.available() && len < sizeof(line) - 1) {
       int ch = f.read();
@@ -205,7 +213,10 @@ static void loadCfg() {
     else if (n == 2) { strncpy(_token, line, sizeof(_token) - 1); _token[sizeof(_token)-1] = 0; }
     else if (n == 3) _fo_on = (line[0] == '1');
     else if (n == 4) { if (v >= OHB_FO_HOLD_MIN && v <= OHB_FO_HOLD_MAX) _fo_hold = (uint16_t)v; }
-    else ohbMeldZet(line);   // regel 6: bestemming van de melding, hex
+    else if (n == 5) ohbMeldZet(line);   // regel 6: bestemming van de melding, hex
+    /* Regel 7 ontbreekt in een bestand van voor 2.12.0; dan blijft de
+     * standaard staan, en dat is precies de bedoeling. */
+    else if (v == 0 || (v >= OHB_DROOGTE_MIN_S && v <= OHB_DROOGTE_MAX_S)) _droogte_s = (uint16_t)v;
     n++;
   }
   f.close();
@@ -276,6 +287,7 @@ static void flushRx() {
     _rx_head = (uint8_t)((_rx_head + 1) % OHB_RX_RING);
     _rx_count--;
     _n_rx++;
+    _rx_sinds_tx++;
   }
   _stall_since = 0;
 }
@@ -332,6 +344,10 @@ static void cmdStatus() {
 }
 
 static void cmdTx(const uint8_t* payload, size_t len) {
+  /* Het VERZOEK is het levensteken voor de droogtemeting, niet pas de
+   * geslaagde zending. */
+  _laatste_tx = millis();
+  _rx_sinds_tx = 0;
   if (len == 0 || len > 255) { _n_tx_ref++; sendErr(OH_ERR_PAYLOAD_TOO_BIG); return; }
   uint32_t airtime = 0;
   if (!_mesh->ohInjectRaw(payload, (int)len, &airtime)) {
@@ -446,7 +462,13 @@ static void failoverTick() {
   const bool verbonden = _cl.connected();
   const bool vastgelopen = verbonden && _guest_seen != 0 &&
       (nu - _guest_seen) > hold * OHB_FO_STALL_MULT;
-  const bool levend = verbonden && !vastgelopen;
+  /* DROOG: verbonden, wij reiken hem pakketten aan, en er komt al die tijd
+   * geen enkel zendverzoek terug -- dan repeteert hij niet. */
+  const bool droog = verbonden && _droogte_s > 0 &&
+      _rx_sinds_tx >= OHB_DROOGTE_MIN_RX && _laatste_tx != 0 &&
+      (nu - _laatste_tx) >= (unsigned long)_droogte_s * 1000UL;
+
+  const bool levend = verbonden && !vastgelopen && !droog;
 
   if (levend) {
     _guest_gone = 0;
@@ -496,6 +518,8 @@ void ohb_loop() {
     if (_cl.connected()) dropClient("nieuwe host meldt zich");
     _cl = nieuw;
     _cl.setNoDelay(true);
+    _laatste_tx = millis();   /* krediet: hij mag eerst nog beginnen */
+    _rx_sinds_tx = 0;
     _cl.setTimeout(2000);   // milliseconden in deze kern; vangnet tegen hangen
     _in_len = 0;
     _authed = (_token[0] == 0);
@@ -516,12 +540,13 @@ void ohb_loop() {
 void ohb_status_line(char* out, size_t cap) {
   snprintf(out, cap,
            "openhop %s poort %u token %s host %s rx %lu tx %lu (geweigerd %lu, "
-           "buffer vol %lu) failover %s%s melding %s repeat %s",
+           "buffer vol %lu) failover %s%s droogte %s melding %s repeat %s",
            _on ? "aan" : "uit", (unsigned)_port, _token[0] ? "gezet" : "leeg",
            _cl.connected() ? _client_ip : "geen",
            (unsigned long)_n_rx, (unsigned long)_n_tx, (unsigned long)_n_tx_ref,
            (unsigned long)_n_sock_full,
            _fo_on ? "aan" : "uit", _fo_taken ? " (OVERGENOMEN)" : "",
+           _droogte_s ? "aan" : "uit",
            _meld_len ? "aan" : "uit",
            (_mesh && _mesh->ohForwarding()) ? "on" : "off");
 }
@@ -563,6 +588,34 @@ bool ohb_handle_command(const char* command, char* reply) {
     /* Een lopende sessie is aangegaan onder de oude regels. */
     dropClient("token gewijzigd");
     snprintf(reply, 155, "OK - token %s", _token[0] ? "gezet" : "gewist");
+    return true;
+  }
+  if (memcmp(p, "droogte", 7) == 0) {
+    const char* t = p + 7;
+    while (*t == ' ') t++;
+    if (*t == 0) {
+      if (_droogte_s == 0) strcpy(reply, "droogte uit");
+      else snprintf(reply, 155, "droogte %u s (na %u aangereikte pakketten)",
+                    (unsigned)_droogte_s, (unsigned)OHB_DROOGTE_MIN_RX);
+      return true;
+    }
+    if (strcmp(t, "uit") == 0) {
+      _droogte_s = 0;
+      saveCfg();
+      strcpy(reply, "OK - droogte uit (nodig bij tx_mode default/sticky)");
+      return true;
+    }
+    long v = strtol(t, nullptr, 10);
+    if (v < OHB_DROOGTE_MIN_S || v > OHB_DROOGTE_MAX_S) {
+      snprintf(reply, 155, "Err - %u..%u seconden, of 'uit'",
+               (unsigned)OHB_DROOGTE_MIN_S, (unsigned)OHB_DROOGTE_MAX_S);
+      return true;
+    }
+    _droogte_s = (uint16_t)v;
+    _laatste_tx = millis();      /* opnieuw krediet geven */
+    _rx_sinds_tx = 0;
+    saveCfg();
+    snprintf(reply, 155, "OK - droogte %u s", (unsigned)_droogte_s);
     return true;
   }
   if (memcmp(p, "melding", 7) == 0) {

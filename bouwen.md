@@ -106,3 +106,21 @@ openhop melding uit               -> af
 Standaard staat het uit. Kent deze node die sleutel niet, dan zegt `test` dat
 meteen in plaats van stil te falen — log met je companion één keer in op de
 repeater en probeer opnieuw.
+
+## De droogtetoets
+
+De failover kijkt sinds 2.12.0 niet alleen of openHop verbonden is, maar ook of
+hij nog zendverzoeken stuurt. Komt er gedurende de droogtetijd geen enkel
+verzoek terwijl deze node hem wel pakketten bleef aanreiken, dan repeteert hij
+niet en neemt deze node het over.
+
+```
+openhop droogte           -> toont de stand
+openhop droogte 600       -> tien minuten (standaard)
+openhop droogte uit       -> af
+```
+
+**Wanneer je hem uit moet zetten.** De toets neemt aan dat elke kop af en toe
+een zendverzoek krijgt. Dat klopt bij `fabric.tx_mode: bridge` en voor de
+`default_radio`, maar bij `default` of `sticky` kan een tweede kop terecht
+nooit iets te zenden krijgen — daar zou de node dan onnodig gaan dubbelrepeteren.
