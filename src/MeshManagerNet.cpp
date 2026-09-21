@@ -5,6 +5,16 @@
  * verschenen is. Met opzet niet herschreven: een release die nooit bestaan
  * heeft, hoort niet in een changelog te staan.
  *
+ * 2.12.1 Een kortere blokkade is nog steeds een blokkade. De brug schreef nog
+ *        altijd blokkerend naar de host, met een socket-timeout van twee
+ *        seconden als enige grens -- genoeg om de hoofdlus te laten haperen,
+ *        de node zichzelf als 'stil' te laten melden en openHop zijn TX_DONE
+ *        te laten missen ("no TX_DONE response", elke 13 s, urenlang). Nu gaan
+ *        frames in een uitgaande buffer die pumpTx() elke ronde leegt met
+ *        send(fd, ..., MSG_DONTWAIT); WiFiClient::fd() bestaat in deze kern
+ *        wel, anders dan availableForWrite(). Een RX_PACKET mag vallen als die
+ *        buffer vol zit, een antwoord niet.
+ *
  * 2.12.0 Een verbinding is geen bewijs dat er nog gerepeteerd wordt. De failover
  *        vroeg alleen of openHop verbonden was; op 20 september 2026 was dat de
  *        hele tijd ja terwijl er niets de lucht in ging, omdat zijn andere kop

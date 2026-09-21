@@ -3,6 +3,8 @@
 #include "MeshManagerNet.h"   /* MESHMANAGER_NAME/VERSION voor GET_VERSION */
 #include <WiFi.h>
 #include <string.h>
+#include <lwip/sockets.h>   // send() met MSG_DONTWAIT: de lus wacht nooit
+#include <errno.h>
 
 /* Zie OpenHopBridge.h voor het waarom en de draadvorm. */
 
@@ -92,6 +94,10 @@ static uint8_t    _rx_head = 0, _rx_count = 0;
 static uint32_t   _n_rx = 0, _n_rx_drop = 0, _n_tx = 0, _n_tx_ref = 0, _n_fo = 0;
 static uint32_t   _n_sock_full = 0;   /* frames gevallen: zendbuffer vol */
 static unsigned long _stall_since = 0;
+/* Uitgaande buffer: frames wachten hier, niet in de hoofdlus. */
+#define OHB_OUT_BUF   2048
+static uint8_t    _out[OHB_OUT_BUF];
+static uint16_t   _out_head = 0, _out_len = 0;
 static uint16_t      _droogte_s = OHB_DROOGTE_DEFAULT_S;   // 0 = uit
 static unsigned long _laatste_tx = 0;
 static uint32_t      _rx_sinds_tx = 0;
@@ -117,26 +123,75 @@ static uint16_t crc16(const uint8_t* d, size_t n, uint16_t crc = 0xFFFF) {
 
 /* alleen_als_plaats: voor de RX-stroom. Antwoorden moeten er gewoon uit --
  * zonder PONG komt hun driver niet eens tot een verbinding. */
+static void dropClient(const char* reden);   // definitie verderop
+
+/* Wat weg kan, gaat weg. Meer niet -- de lus wacht nergens op. */
+static void pumpTx() {
+  if (_out_len == 0) { _stall_since = 0; return; }
+  if (!_cl.connected()) { _out_head = _out_len = 0; return; }
+  int fd = _cl.fd();
+  if (fd < 0) return;
+
+  while (_out_len > 0) {
+    int n = ::send(fd, _out + _out_head, _out_len, MSG_DONTWAIT);
+    if (n > 0) {
+      _out_head = (uint16_t)(_out_head + n);
+      _out_len  = (uint16_t)(_out_len - n);
+      if (_out_len == 0) { _out_head = 0; _stall_since = 0; }
+      continue;
+    }
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      if (_stall_since == 0) _stall_since = millis();
+      else if (millis() - _stall_since >= OHB_STALL_DROP_MS * 6) {
+        dropClient("host neemt niets meer aan");
+      }
+      return;
+    }
+    dropClient("schrijffout op de socket");
+    return;
+  }
+}
+
+static void outPush(const uint8_t* p, size_t n) {
+  if (_out_head > 0 && (size_t)(_out_head + _out_len + n) > OHB_OUT_BUF) {
+    memmove(_out, _out + _out_head, _out_len);
+    _out_head = 0;
+  }
+  memcpy(_out + _out_head + _out_len, p, n);
+  _out_len = (uint16_t)(_out_len + n);
+}
+
+/* DE HOOFDLUS WACHT NIET. write() blokkeert tot de bytes weg kunnen; een
+ * socket-timeout maakt dat korter, niet goed. Frames gaan daarom in een
+ * uitgaande buffer die pumpTx() met MSG_DONTWAIT leegt.
+ *
+ * alleen_als_plaats: voor de RX-stroom. Een RX_PACKET mag vallen als de buffer
+ * vol zit; een antwoord (PONG, TX_DONE) niet -- zonder TX_DONE blijft openHop
+ * eindeloos opnieuw vragen, en dat is precies wat er misging. */
 static bool sendFrame(uint8_t cmd, const uint8_t* payload, size_t len,
                       bool alleen_als_plaats = false) {
   if (!_cl.connected()) return false;
 
-  /* EEN GAST MAG ZENDTIJD KOSTEN, GEEN HOOFDLUS. WiFiClient::write() wacht tot
-   * de bytes weg kunnen; leest de host even niet, dan staat deze repeater stil.
-   * Dus alleen schrijven als er NU plaats is, en anders het frame laten vallen
-   * en dat tellen. */
-  /* GEEN availableForWrite(): die bestaat in deze kern niet en geeft 0, dus
-   * daarop drempelen gooide elk RX-frame weg. De grens zit in de tijd: de
-   * socket-timeout staat op twee seconden, en een host die structureel niets
-   * aanneemt wordt opgevangen door de stilstand-teller in flushRx(). */
-  (void)alleen_als_plaats;
+  const size_t nodig = 4 + len + 2;
+  if (nodig > OHB_OUT_BUF) return false;
+
+  if ((size_t)(OHB_OUT_BUF - _out_len) < nodig) {
+    if (alleen_als_plaats) { _n_sock_full++; return false; }
+    _n_rx_drop += (uint32_t)(_out_len / 64);   // ruwe, eerlijk lage schatting
+    _out_head = _out_len = 0;
+    _n_sock_full++;
+  }
+
   uint8_t hdr[4] = { OH_SYNC, cmd, (uint8_t)(len & 0xFF), (uint8_t)((len >> 8) & 0xFF) };
   uint16_t crc = crc16(&hdr[1], 3);
   if (payload && len) crc = crc16(payload, len, crc);
-  if (_cl.write(hdr, 4) != 4) return false;
-  if (payload && len && _cl.write(payload, len) != len) return false;
   uint8_t tail[2] = { (uint8_t)(crc & 0xFF), (uint8_t)(crc >> 8) };
-  return _cl.write(tail, 2) == 2;
+
+  outPush(hdr, 4);
+  if (payload && len) outPush(payload, len);
+  outPush(tail, 2);
+  pumpTx();
+  return true;
 }
 
 static void sendErr(uint8_t code) { sendFrame(OH_CMD_ERROR, &code, 1); }
@@ -507,6 +562,9 @@ void ohb_begin(fs::FS& fs, MyMesh* mesh) {
 
 void ohb_loop() {
   if (!_on || _mesh == nullptr) return;
+  /* Eerst de uitgaande buffer legen: een TX_DONE mag niet blijven hangen
+   * tot er toevallig nieuw verkeer langskomt. */
+  pumpTx();
   failoverTick();
   if (WiFi.status() != WL_CONNECTED) return;   // zonder netwerk valt er niets te doen
   if (!_listening) startServer();
@@ -520,7 +578,8 @@ void ohb_loop() {
     _cl.setNoDelay(true);
     _laatste_tx = millis();   /* krediet: hij mag eerst nog beginnen */
     _rx_sinds_tx = 0;
-    _cl.setTimeout(2000);   // milliseconden in deze kern; vangnet tegen hangen
+    // Geen setTimeout: er wordt hier nooit blokkerend geschreven.
+    _out_head = _out_len = 0;
     _in_len = 0;
     _authed = (_token[0] == 0);
     _guest_seen = millis();
