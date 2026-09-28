@@ -3,6 +3,7 @@
 De volledige toelichting per versie staat in de kop van
 `src/MeshManagerNet.cpp`; dit is de korte lijst.
 
+- **2.13.0** - Wake-on-LAN: een pc wekken vanaf de mesh (`wol`, plus webpaneel)
 - **2.12.1** - De hoofdlus wacht nooit meer op de socket (MSG_DONTWAIT)
 - **2.12.0** - Verbonden is niet hetzelfde als repeterend: failover op zendverzoeken
 - **2.11.6** - Een failover hoort iemand wakker te maken: melding naar je companion

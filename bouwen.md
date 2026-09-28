@@ -124,3 +124,28 @@ openhop droogte uit       -> af
 een zendverzoek krijgt. Dat klopt bij `fabric.tx_mode: bridge` en voor de
 `default_radio`, maar bij `default` of `sticky` kan een tweede kop terecht
 nooit iets te zenden krijgen — daar zou de node dan onnodig gaan dubbelrepeteren.
+
+## Wake-on-LAN
+
+Sinds 2.13.0 kan deze repeater een pc op zijn eigen netwerk wekken. Op de
+beheerpagina staat er een blok voor tussen *WiFi* en *Energie*; over de console
+en de mesh-CLI is het:
+
+```
+wol                      stuurt naar het bewaarde MAC
+wol ip 192.168.110.60    zoekt het MAC op via ARP en bewaart het
+wol 8cc681eb9957         bewaart en stuurt meteen
+wol set <mac>            alleen bewaren
+wol uit                  bestemming wissen
+```
+
+**Waarom er een MAC in staat en geen IP.** Een slapende netwerkkaart heeft geen
+IP-stack draaien; het enige wat ze nog doet is haar eigen MAC herkennen in het
+magic packet. Een IP invullen mag wel — dan zoekt de repeater het MAC eenmalig
+op via ARP en bewaart dat. Dat lukt alleen zolang die machine nog **wakker** is.
+
+**Aan de kant van de pc** moet de netwerkkaart het mogen: *Energiebeheer → dit
+apparaat mag de computer uit de slaapstand halen*, en bij voorkeur ook *alleen
+een magic packet*. Let op dat dit iets anders is dan "Wake on Magic Packet" op
+het tabblad Geavanceerd; dat laatste zet het alleen in de driver aan. Met
+`powercfg /devicequery wake_armed` zie je wat Windows werkelijk toestaat.

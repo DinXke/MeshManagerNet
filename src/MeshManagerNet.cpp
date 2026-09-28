@@ -5,6 +5,16 @@
  * verschenen is. Met opzet niet herschreven: een release die nooit bestaan
  * heeft, hoort niet in een changelog te staan.
  *
+ * 2.13.0 Wake-on-LAN: een pc wekken vanaf de mesh. Commando 'wol' op de
+ *        console, in de mesh-CLI en achter een eigen blok op de beheerpagina.
+ *        Wekken kan ALLEEN op MAC -- een slapende netwerkkaart heeft geen
+ *        IP-stack en herkent enkel haar eigen MAC in het magic packet. Een
+ *        ingevuld IP wordt daarom eenmalig via ARP omgezet (etharp_request +
+ *        etharp_find_addr) en als MAC bewaard; dat lukt alleen zolang die pc
+ *        nog wakker is. Het pakket gaat naar het SUBNET-broadcastadres en niet
+ *        naar 255.255.255.255, dat door menig stack stil geweigerd wordt.
+ *        Gemeten: 102 bytes ontvangen op UDP/9, ffffffffffff + het MAC.
+ *
  * 2.12.1 Een kortere blokkade is nog steeds een blokkade. De brug schreef nog
  *        altijd blokkerend naar de host, met een socket-timeout van twee
  *        seconden als enige grens -- genoeg om de hoofdlus te laten haperen,
@@ -1024,6 +1034,7 @@
 
 #include "MeshManagerNet.h"
 #include "OpenHopBridge.h"
+#include "WolCmd.h"
 #include "MyMesh.h"
 #include "PacketFilter.h"
 
@@ -6190,6 +6201,13 @@ static const char PAGE[] PROGMEM =
   "<label><span data-i18n=l_appass></span><input name=ap_pass type=password data-i18n-ph=ph_unch></label>"
   "<button type=submit data-i18n=b_saveconn></button></form>"
   "<p class=muted data-i18n=h_wifi></p></div></details>"
+  "<details class=sec data-ck=wol><summary data-i18n=t_wol></summary><div class=card>"
+  "<form id=w><label><span data-i18n=l_woldest></span>"
+  "<input name=mac maxlength=40 placeholder=\"8c:c6:81:eb:99:57  /  192.168.110.60\"></label>"
+  "<button type=submit data-i18n=b_save></button></form>"
+  "<div class=row><button id=wsend data-i18n=b_wake></button>"
+  "<span id=wst class=muted></span></div>"
+  "<p class=muted data-i18n=h_wol></p></div></details>"
   "<details class=sec data-ck=power><summary data-i18n=t_power></summary><div class=card><form id=p>"
   "<div class=row><label><span data-i18n=l_mode></span><select name=mode>"
   "<option value=0 data-i18n=o_always></option><option value=1 data-i18n=o_save></option>"
@@ -6259,10 +6277,15 @@ static const char PAGE[] PROGMEM =
   "<button type=submit data-i18n=b_restore></button></form></div></details>"
   "</main><script>"
   "var T={nl:{"
-  "t_state:'Toestand',t_wifi:'WiFi',t_power:'Energie',t_mqtt:'MQTT',t_fw:'Firmware',"
+  "t_state:'Toestand',t_wifi:'WiFi',t_wol:'Wake-on-LAN',t_power:'Energie',t_mqtt:'MQTT',t_fw:'Firmware',"
   "t_backup:'Back-up',l_ssid:'Netwerk (SSID)',l_pass:'Wachtwoord',"
   "l_appass:'Wachtwoord van het eigen netwerk',b_saveconn:'Opslaan en verbinden',b_save:'Opslaan',"
   "ph_unch:'ongewijzigd',"
+  "l_woldest:'Bestemming',b_save:'Bewaren',b_wake:'Nu wekken',"
+  "h_wol:'Wekt een pc op dit netwerk met een magic packet. Wekken kan alleen op MAC: een "
+  "slapende netwerkkaart heeft geen IP-stack en herkent enkel haar eigen MAC. Vul je een IP in, "
+  "dan zoekt de repeater het MAC eenmalig op via ARP en bewaart dat - dat lukt alleen zolang die "
+  "pc nog wakker is. Op de pc moet de netwerkkaart de computer mogen wekken.',"
   "h_wifi:'Lukt verbinden niet, dan zendt de repeater zijn eigen netwerk uit en blijft hij het "
   "jouwe proberen. Via de mesh-CLI werkt wifi altijd.',"
   "l_mode:'Modus',o_always:'Altijd bereikbaar',o_save:'Zuinig (WiFi meestal uit)',"
@@ -6428,7 +6451,11 @@ static const char PAGE[] PROGMEM =
   "q_cadd:'kanaal %1 blokkeren',q_crem:'kanaal %1 weer doorlaten',"
   "f_okm:'Gedaan: %1.',f_badm:'Niet gedaan. %1'},"
   "en:{"
-  "t_state:'Status',t_wifi:'WiFi',t_power:'Power',t_mqtt:'MQTT',t_fw:'Firmware',"
+  "t_state:'Status',t_wifi:'WiFi',t_wol:'Wake-on-LAN',t_power:'Power',t_mqtt:'MQTT',t_fw:'Firmware',"
+  "l_woldest:'Target',b_save:'Save',b_wake:'Wake now',"
+  "h_wol:'Wakes a PC on this network with a magic packet. Waking only works by MAC: a sleeping "
+  "NIC has no IP stack and only matches its own MAC. Enter an IP and the repeater resolves it "
+  "once via ARP and stores the MAC - which only works while that PC is still awake.',"
   "t_backup:'Backup',l_ssid:'Network (SSID)',l_pass:'Password',"
   "l_appass:'Password of its own network',b_saveconn:'Save and connect',b_save:'Save',"
   "ph_unch:'unchanged',"
@@ -6733,6 +6760,15 @@ static const char PAGE[] PROGMEM =
   "$('#th').onclick=function(){TH=TH=='light'?'dark':'light';"
   "localStorage.setItem('mstheme',TH);theme()};"
   "$('#lg').onclick=function(){L=L=='nl'?'en':'nl';localStorage.setItem('mslang',L);lang()};"
+  "function wolLoad(){fetch('/api/wol').then(function(r){return r.json()}).then(function(j){"
+  "if(j.mac){$('#w').mac.value=j.mac}"
+  "$('#wst').textContent=j.mac?j.mac:''}).catch(function(){})}"
+  "function wolPost(b){return fetch('/api/wol',{method:'POST',body:new URLSearchParams(b)})"
+  ".then(function(r){return r.json()}).then(function(j){$('#wst').textContent=j.msg;"
+  "if(j.mac){$('#w').mac.value=j.mac}})}"
+  "$('#w').onsubmit=function(e){e.preventDefault();wolPost({mac:$('#w').mac.value})};"
+  "$('#wsend').onclick=function(e){e.preventDefault();wolPost({send:'1'})};"
+  "wolLoad();"
   "$('#f').onsubmit=function(e){e.preventDefault();post('/api/wifi',$('#f'),function(){"
   "$('#f').pass.value='';$('#f').ap_pass.value='';alert(T[L].a_saved)})};"
   "function rulespec(){var p=document.querySelectorAll('#rt .rp'),"
@@ -8761,6 +8797,65 @@ static void handleFilterGet(AsyncWebServerRequest *req) {
  * theoretisch punt -- 'filter hops 05 0' wordt keurig aangenomen en betekent
  * "stuur geen groepstekst meer door", en dat wil je op het scherm zien in de
  * vorm waarin het gehandhaafd wordt, niet in de vorm waarin je het intypte. */
+/* GET /api/wol -- welke bestemming staat er. */
+static void handleWolGet(AsyncWebServerRequest *req) {
+  if (!requireAuth(req)) return;
+  char mac[24];
+  wol_mac_text(mac, sizeof(mac));
+  static char body[128];
+  snprintf(body, sizeof(body), "{\"mac\":\"%s\",\"msg\":\"\"}", mac);
+  req->send(200, "application/json", body);
+}
+
+/* POST /api/wol   mac=<mac|ip|uit>   send=1
+ *
+ * Eén eindpunt voor de drie dingen die je met dit paneel doet. Een IP wordt via
+ * ARP omgezet en als MAC bewaard; wekken zelf kan nooit op IP, want een slapende
+ * kaart heeft geen IP-stack. */
+static void handleWolPost(AsyncWebServerRequest *req) {
+  if (!requireAuth(req)) return;
+
+  char mac_in[48] = "";
+  char snd[8] = "";
+  copyParam(req, "mac", mac_in, sizeof(mac_in));
+  copyParam(req, "send", snd, sizeof(snd));
+
+  char msg[192] = "";
+
+  if (mac_in[0]) {
+    bool lijkt_ip = true; int punten = 0;
+    for (const char *q = mac_in; *q; q++) {
+      if (*q == '.') { punten++; continue; }
+      if (*q < '0' || *q > '9') { lijkt_ip = false; break; }
+    }
+    if (lijkt_ip && punten == 3) {
+      wol_resolve_ip(mac_in, msg, sizeof(msg));
+    } else if (!wol_set_mac(mac_in)) {
+      snprintf(msg, sizeof(msg), "mac verwacht 12 hexcijfers, of een IP-adres");
+    } else {
+      char m[24]; wol_mac_text(m, sizeof(m));
+      snprintf(msg, sizeof(msg), "bestemming %s", wol_have_mac() ? m : "uit");
+    }
+  }
+
+  if (snd[0] == '1') {
+    char r[192];
+    wol_send(r, sizeof(r));
+    if (msg[0]) { size_t n = strlen(msg); snprintf(msg + n, sizeof(msg) - n, " | %s", r); }
+    else snprintf(msg, sizeof(msg), "%s", r);
+  }
+
+  if (!msg[0]) snprintf(msg, sizeof(msg), "niets te doen");
+
+  char mac_uit[24];
+  wol_mac_text(mac_uit, sizeof(mac_uit));
+  static char body[320];
+  char esc[sizeof(msg) * 2];
+  jsonEsc(esc, sizeof(esc), msg);
+  snprintf(body, sizeof(body), "{\"mac\":\"%s\",\"msg\":\"%s\"}", mac_uit, esc);
+  req->send(200, "application/json", body);
+}
+
 static void handleFilterPost(AsyncWebServerRequest *req) {
   if (!requireAuth(req)) return;
 
@@ -9603,6 +9698,9 @@ bool mmnet_handle_command(const char *command, char *reply) {
    * mesh te werken: een dakrepeater die je alleen via zijn webpagina kunt
    * instellen, ben je kwijt zodra de wifi wegvalt. */
   if (ohb_handle_command(command, reply)) return true;
+  /* Wake-on-LAN. Hier zodat het over de mesh-CLI, de console op poort 23 en
+   * de beheerpagina allemaal hetzelfde commando is. */
+  if (wol_handle_command(command, reply, 155)) return true;
 
   if (memcmp(command, "wifi", 4) != 0) {
     /* Both versions in one line: this module and the MeshCore release it is
@@ -9847,6 +9945,8 @@ void mmnet_begin(FS &fs, MyMesh *mesh) {
    * version of that library claiming /api/* cannot shadow it, and registered
    * unconditionally -- including in safe mode, which is exactly the state in
    * which somebody needs to put a working image back on this node. */
+  _server.on("/api/wol", HTTP_GET, handleWolGet);
+  _server.on("/api/wol", HTTP_POST, handleWolPost);
   _server.on("/api/filter", HTTP_GET, handleFilterGet);
   _server.on("/api/filter", HTTP_POST, handleFilterPost);
   _server.on("/api/cfg", HTTP_GET, handleCfgList);

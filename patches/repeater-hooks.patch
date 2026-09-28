@@ -904,22 +904,23 @@ index 2f923c87..2556a349 100644
    void setBridgeState(bool enable) override {
      if (enable == bridge.isRunning()) return;
 diff --git a/examples/simple_repeater/main.cpp b/examples/simple_repeater/main.cpp
-index a714db68..8093e7b2 100644
+index a714db68..9a75a717 100644
 --- a/examples/simple_repeater/main.cpp
 +++ b/examples/simple_repeater/main.cpp
-@@ -13,6 +13,11 @@
+@@ -13,6 +13,12 @@
    #include <helpers/nrf52/EthernetCLI.h>
  #endif
  
 +#ifdef MESHMANAGER_NET
 +  #include "MeshManagerNet.h"
 +#include "OpenHopBridge.h"
++#include "WolCmd.h"
 +#endif
 +
  StdRNG fast_rng;
  SimpleMeshTables tables;
  
-@@ -60,9 +65,14 @@ void setup() {
+@@ -60,9 +66,14 @@ void setup() {
    }
  #endif
  
@@ -935,7 +936,7 @@ index a714db68..8093e7b2 100644
    }
  
    fast_rng.begin(radio_driver.getRngSeed());
-@@ -102,10 +112,25 @@ void setup() {
+@@ -102,10 +113,27 @@ void setup() {
    ethernet_command[0] = 0;
  #endif
  
@@ -945,6 +946,7 @@ index a714db68..8093e7b2 100644
 +    // draaien we enkel WiFi, beheerpagina en console, zodat je kan herflashen.
 +    mmnet_begin(*fs, &the_mesh);
 +  ohb_begin(*fs, &the_mesh);   // openHop-brug; standaard uit
++  wol_begin(*fs);              // Wake-on-LAN: bewaard MAC inlezen
 +    while (1) { mmnet_loop(); delay(5); }
 +  }
 +#endif
@@ -956,12 +958,13 @@ index a714db68..8093e7b2 100644
 +#ifdef MESHMANAGER_NET
 +  mmnet_begin(*fs, &the_mesh);
 +  ohb_begin(*fs, &the_mesh);   // openHop-brug; standaard uit
++  wol_begin(*fs);              // Wake-on-LAN: bewaard MAC inlezen
 +#endif
 +
  #ifdef DISPLAY_CLASS
    ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
  #endif
-@@ -170,6 +195,11 @@ void loop() {
+@@ -170,6 +198,11 @@ void loop() {
    }
  #endif
  
