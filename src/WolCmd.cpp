@@ -1,4 +1,5 @@
 #include "WolCmd.h"
+#include "BrownOut.h"
 
 #include <string.h>
 #include <ctype.h>
@@ -19,6 +20,7 @@ static bool    _gezet = false;
 // ------------------------------------------------------------------ opslag
 static void wolSave() {
   if (_fs == nullptr) return;
+  if (!brn_allow_write("wol-mac")) return;
   if (!_gezet) { if (_fs->exists(WOL_FILE)) _fs->remove(WOL_FILE); return; }
   fs::File f = _fs->open(WOL_FILE, "w", true);
   if (!f) return;

@@ -1,6 +1,7 @@
 #include "OpenHopBridge.h"
 #include "MyMesh.h"
 #include "MeshManagerNet.h"   /* MESHMANAGER_NAME/VERSION voor GET_VERSION */
+#include "BrownOut.h"
 #include <WiFi.h>
 #include <string.h>
 #include <lwip/sockets.h>   // send() met MSG_DONTWAIT: de lus wacht nooit
@@ -236,6 +237,7 @@ static void ohbMeld(const char* tekst) {
 // ------------------------------------------------------------- persistentie
 static void saveCfg() {
   if (_fs == nullptr) return;
+  if (!brn_allow_write("openhop-cfg")) return;
   fs::File f = _fs->open(OHB_CFG_PATH, "w", true);
   if (!f) return;
   f.printf("%d\n%u\n%s\n%d\n%u\n", _on ? 1 : 0, (unsigned)_port, _token,

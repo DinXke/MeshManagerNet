@@ -5,6 +5,111 @@
  * verschenen is. Met opzet niet herschreven: een release die nooit bestaan
  * heeft, hoort niet in een changelog te staan.
  *
+ * 2.15.1 De advert-cache probeerde zichzelf stuk te schrijven. Weigerde de
+ *        brownout-poort die write, dan bleef de dirty-vlag staan op een
+ *        moment dat al voorbij was -- en dus bood mmnet_loop() hem ELKE
+ *        ronde opnieuw aan. Op het dak gemeten: 2.208.739 weigeringen in
+ *        twee nachten, elk met een consoleregel, precies in de uren dat de
+ *        cel onder de 15 % stond. De bedoeling was "probeer het later nog
+ *        eens"; wat er stond was "probeer het onophoudelijk". Nu schuift
+ *        een geweigerde write de vlag een minuut vooruit (ADV_RETRY_DELAY),
+ *        zodat de cache nog steeds terugkomt zodra de zon er is.
+ *
+ *        Alleen advSave() had deze vorm: de elf andere poortaanroepen
+ *        hangen aan een gebeurtenis (een POST, een boot, een edit) en niet
+ *        aan de hoofdlus, dus die herhalen niet uit zichzelf.
+ *
+ * 2.15.0 De backup wees naar de verkeerde plek. Sinds arduino-esp32 2.0
+ *        geeft File::name() alleen de BASISNAAM terug en File::path() het
+ *        volledige pad (vfs_api.cpp: name() is pathToFileName(path())).
+ *        writeBackupFile() gebruikte name(), dus de sleutel op
+ *        /identity/_main.id werd genoteerd als `FILE /_main.id`. Bij het
+ *        terugzetten ontstond daardoor een NIEUW, nutteloos /_main.id terwijl
+ *        de node zijn sleutel bleef laden uit /identity/_main.id: twee
+ *        bestanden, en de identiteit kwam niet terug. Dit is wat er op het
+ *        dak gebeurd is na 22 oktober.
+ *
+ *        Het ergste eraan is dat zo'n backup er geldig uitzag. Hij bevatte de
+ *        juiste bytes onder een pad waar niemand ze leest, en de nachtelijke
+ *        controle die op /_main.id zoekt, vond hem gewoon.
+ *
+ *        Gemeten op het toestel: drie herstelpogingen, drie nieuwe
+ *        identiteiten, en pas daarna viel het kwartje. De node is uiteindelijk
+ *        gered door het bestandssysteem-beeld rechtstreeks te uploaden met de
+ *        sleutel op data/identity/_main.id; hij draait weer als 55D9A320A4E3.
+ *
+ *        Gerepareerd bij de bron. backupWalk() bouwt het pad nu ZELF op:
+ *        f.path() als de kern die invult, anders map + "/" + f.name(), en
+ *        mappen worden ingedoken (nodig op LittleFS; SPIFFS is plat en levert
+ *        /identity/_main.id als één naam uit de wortel). Dat geldt meteen voor
+ *        elk bestand in een submap, niet alleen voor de sleutel.
+ *
+ *        En de backup controleert zichzelf: ontbreekt /identity/_main.id, dan
+ *        komt er een WAARSCHUWING op de console in plaats van niets.
+ *
+ *        applyRestore() doet nu drie dingen die het niet deed:
+ *          - WEIGEREN als de dump geen identiteit bevat, en wel vóórdat er
+ *            iets geschreven is (restoreHasIdentity(), een aparte leesronde).
+ *            Halverwege ontdekken dat de sleutel ontbreekt is te laat; een
+ *            restore is onomkeerbaar. Liever hard weigeren dan stil half
+ *            herstellen -- dat laatste is hoe dit drie keer is misgegaan.
+ *          - mappen aanmaken voor het schrijven (makeParentDirs(); een lege
+ *            handeling op SPIFFS, noodzakelijk op LittleFS).
+ *          - per bestand eerst remove(), dan pas openen.
+ *        Plus de omlegging van .id-bestanden uit de wortel naar /identity/,
+ *        zodat de dumps die er NU al liggen alsnog bruikbaar zijn. Zonder die
+ *        omlegging zijn ze dat niet en merkt niemand het.
+ *
+ *        Vastgelegd in examples/simple_repeater/BACKUP.md -- dit is het soort
+ *        fout dat je één keer maakt en dan voor altijd wil opschrijven.
+ *
+ *        Nieuw: 'fs ls' en 'fs rm <pad>', zodat het losse /_main.id van een
+ *        node op een dak weg kan zonder flashen. Wissen onder /identity
+ *        vereist het woord 'force' erachter: dat is de ene map waarin een
+ *        vergissing onherstelbaar is. 'fs rm' loopt door de brownout-poort.
+ *
+ *        NA TE KIJKEN: controleert de nachtelijke backupjob letterlijk op het
+ *        token /_main.id, dan moet hij /identity/_main.id leren aanvaarden.
+ *        Als substring zit het er nog in, als los veld niet.
+ *
+ * 2.14.0 Brownout-bescherming (BrownOut.cpp/.h). Aanleiding: de dakrepeater
+ *        is leeggelopen en kwam terug met de fabrieksnaam en zonder
+ *        adminwachtwoord -- /prefs.json gesneuveld tijdens het leeglopen.
+ *        Drie maatregelen, in volgorde van belang:
+ *
+ *        1. STOPPEN MET SCHRIJVEN. Onder 15 % weigert brn_allow_write() elke
+ *           niet-essentiele schrijfactie: prefs, wifi-config, filterregels,
+ *           advert-cache, monitorlijst, openhop, wol, backup, restore en de
+ *           bootteller. Een geweigerde write is zichtbaar (teller + laatste
+ *           weigeraar in 'brownout' en in de statistiek-JSON) en wordt op de
+ *           console gemeld; hij faalt nooit stil. Een brownout tijdens een
+ *           schrijfactie is wat de vorige keer de prefs heeft gesloopt, dus
+ *           dit is de maatregel die er het meest toe doet.
+ *
+ *        2. EEN DEUGDELIJKE CURVE. De lineaire 3000..4200 mV is weg. Die zei
+ *           bij 3600 mV nog 50 % terwijl de cel daar op ~8 % staat, en dat is
+ *           precies het gebied waarin deze node is leeggelopen. Nu een
+ *           stuksgewijs lineaire 1S-LiPo-curve (tabel in BrownOut.cpp, op één
+ *           plek, met herkomst), 0 % op 3300 mV, en gerekend op de MEDIAAN van
+ *           acht metingen in plaats van op de laatste -- een zendpiek trekt
+ *           een losse meting tientallen millivolts omlaag.
+ *
+ *        3. NETJES SLAPEN, NIET UITGAAN. Onder 10 %, pas na vijf minuten aan
+ *           opeenvolgende metingen en nooit terwijl er geladen wordt of
+ *           iemand met de node bezig is: deep sleep MET wektimer (standaard
+ *           30 min), niet board.powerOff(). powerOff() is slapen zonder
+ *           wekbron en vraagt een knopdruk -- op een dak hetzelfde als stuk.
+ *           Zo komt de node vanzelf terug zodra het paneel weer levert.
+ *           Omdat wakker worden op ESP32 een herstart is, telt de bootteller
+ *           die rondes niet mee: anders stond hij na drie wolken in veilige
+ *           modus en na zes zou deze module zichzelf uitschakelen.
+ *
+ *        Verder: setup() maakt GEEN nieuwe sleutel meer aan als /identity niet
+ *        laadt terwijl de accu laag staat -- dan is beschadigde flash de
+ *        waarschijnlijkste oorzaak, en een nieuwe sleutel wegschrijven maakt
+ *        het verlies definitief. Nieuw commando 'brownout', en 'wifi' toont
+ *        nu ook de millivolts naast het percentage.
+ *
  * 2.13.0 Wake-on-LAN: een pc wekken vanaf de mesh. Commando 'wol' op de
  *        console, in de mesh-CLI en achter een eigen blok op de beheerpagina.
  *        Wekken kan ALLEEN op MAC -- een slapende netwerkkaart heeft geen
@@ -1037,6 +1142,7 @@
 #include "WolCmd.h"
 #include "MyMesh.h"
 #include "PacketFilter.h"
+#include "BrownOut.h"
 
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
@@ -1144,11 +1250,11 @@
 #define DISABLE_BOOTS            6
 #define STABLE_UPTIME_MS   300000UL
 
-/* Cell voltage window used to derive a percentage. Same curve as the rest of
- * this project. It is crude at both ends of a LiPo discharge curve, but it
- * never has to be accurate: it only has to pick one of five buckets. */
-#define BATT_EMPTY_MV     3000
-#define BATT_FULL_MV      4200
+/* De spanning-naar-procent-omrekening stond hier als een lineaire schaal van
+ * 3000 tot 4200 mV. Die is weg: hij was niet 'een beetje grof' maar structureel
+ * te optimistisch rond de knie van de ontlaadcurve, en dat is precies het
+ * gebied waarin de dakrepeater is leeggelopen. De curve staat nu op één plek,
+ * in BrownOut.cpp, en wordt via brn_percent() gebruikt. */
 
 /* Task watchdog. DO NOT REMOVE THIS BECAUSE IT LOOKS REDUNDANT -- it closes a
  * hole the other three safety nets cannot reach.
@@ -1866,6 +1972,11 @@ static void loadConfig() {
 
 static void saveConfig() {
   if (!_fs) return;
+  /* Niet-essentieel in de zin van 'kan wachten': de node draait prima verder
+   * met de instellingen die al in RAM staan, en bij de volgende herstart met
+   * een volle cel schrijft hij ze alsnog weg. Een half geschreven mmnet.json
+   * daarentegen kost je de wifi-gegevens van een node op een dak. */
+  if (!brn_allow_write("wifi-cfg")) return;
   File f = _fs->open(MMNET_CFG_FILE, "w");
   if (!f) return;
   f.printf("{\"ssid\":\"%s\",\"pass\":\"%s\",\"ap_pass\":\"%s\","
@@ -1902,12 +2013,27 @@ static void checkSafeMode() {
   _safe_mode = (count >= SAFE_MODE_BOOTS);
   _disabled = (count >= DISABLE_BOOTS);
 
+  /* Twee redenen om deze schrijfactie bij een lege accu over te slaan, en ze
+   * zijn allebei zwaar:
+   *
+   * 1. Dit is de ALLEREERSTE flashwrite van de boot, op het moment dat de
+   *    voeding het slechtst is. Precies het scenario dat de vorige keer
+   *    /prefs.json heeft gekost.
+   * 2. Wakker worden uit brownout-slaap is op ESP32 een volledige herstart.
+   *    Zonder deze uitzondering telt elke hermeting als een mislukte start:
+   *    na drie rondes staat de node in veilige modus en na zes schakelt deze
+   *    module zichzelf uit -- terwijl er niets mis is behalve een wolk. De
+   *    bootteller mag alleen echte startproblemen tellen.
+   */
+  if (!brn_allow_write("bootteller")) return;
+
   f = _fs->open(MMNET_BOOT_FILE, "w");
   if (f) { f.write((uint8_t)(count + 1)); f.close(); }
 }
 
 static void clearBootCount() {
   if (!_fs || _boot_cleared) return;
+  if (!brn_allow_write("bootteller")) return;
   File f = _fs->open(MMNET_BOOT_FILE, "w");
   if (f) { f.write((uint8_t)0); f.close(); }
   _boot_cleared = true;
@@ -1967,22 +2093,26 @@ static const char *stateNameNl() {
 
 // --------------------------------------------------------- power management
 
-/* Battery percentage over BATT_EMPTY_MV..BATT_FULL_MV. A board that reports no
- * voltage at all is treated as 'unknown', and unknown is treated as mains
- * power further on: a node that cannot measure its cell should not be
- * throttled by a guess. */
+/* Battery percentage. A board that reports no voltage at all is treated as
+ * 'unknown', and unknown is treated as mains power further on: a node that
+ * cannot measure its cell should not be throttled by a guess.
+ *
+ * De curve zelf staat in BrownOut.cpp. Deze functie blijft bestaan omdat de
+ * monitor hem ook gebruikt voor de spanning die ANDERE repeaters terugmelden
+ * (zie applyMonAction), en die hebben geen BrownOut-module hier draaien. */
 int meshmanager_batt_percent(uint16_t mv) {
-  if (mv < 2000) return -1;                      // no usable reading
-  if (mv <= BATT_EMPTY_MV) return 0;
-  if (mv >= BATT_FULL_MV) return 100;
-  return (int)(((uint32_t)(mv - BATT_EMPTY_MV) * 100) / (BATT_FULL_MV - BATT_EMPTY_MV));
+  return brn_percent(mv);
 }
 
+/* Leest niet meer zelf de ADC. De BrownOut-module bemonstert al elke tien
+ * seconden en geeft de MEDIAAN van acht metingen terug; dat is dezelfde
+ * cadans als deze functie had, maar zonder de zendpiek die één losse meting
+ * tientallen millivolts omlaag trekt. Twee modules die om de tien seconden
+ * dezelfde deler inschakelen was bovendien gewoon dubbel werk. */
 static uint8_t battPercent(bool *known) {
-  _batt_mv = board.getBattMilliVolts();
-  int pct = meshmanager_batt_percent(_batt_mv);
-  *known = (pct >= 0);
-  return (pct < 0) ? 0 : (uint8_t)pct;
+  _batt_mv = brn_mv();
+  *known = brn_known();
+  return brn_pct();
 }
 
 /* Battery percentage -> publish interval, as a table the user owns instead of
@@ -2058,6 +2188,7 @@ static void pwrDefaults() {
 
 static void pwrSave() {
   if (!_fs) return;
+  if (!brn_allow_write("pwr-regels")) return;
   File f = _fs->open(MMPWR_FILE, "w");
   if (!f) return;
   f.print("{\"rules\":[");
@@ -3313,6 +3444,7 @@ void meshmanager_on_forward_verdict(bool allowed, uint8_t reason,
 #define ADV_CACHE_MAX     48
 #define ADV_NAME_MAX      24
 #define ADV_WRITE_DELAY   120000UL        // 2 minutes of quiet before writing
+#define ADV_RETRY_DELAY    60000UL        // na een geweigerde write: niet meteen opnieuw
 
 /* What we learned about a node BY ASKING, as opposed to what it says about
  * itself. One bit so far, and it is the bit that replaced a filter.
@@ -3450,6 +3582,27 @@ static void advLoad() {
 
 static void advSave() {
   if (!_fs) return;
+  /* Zuivere cache: alles hierin komt vanzelf terug zodra de buren opnieuw
+   * adverteren. Van alle schrijfacties in deze module is dit degene die het
+   * minst gemist wordt en die het vaakst gebeurt -- eerste kandidaat om te
+   * weigeren. De dirty-vlag blijft staan, dus zodra de zon terug is schrijft
+   * mmnet_loop() hem alsnog weg. */
+  if (!brn_allow_write("advert-cache")) {
+    /* De dirty-vlag MOET blijven staan -- anders is de cache weg zodra de zon
+     * terugkomt. Maar hem laten staan op een moment dat al voorbij is, maakt
+     * er een hete lus van: mmnet_loop() biedt hem dan elke ronde opnieuw aan
+     * en krijgt elke ronde nee. Gemeten op de dakrepeater: 2.208.739
+     * weigeringen in twee nachten, elk met een regel naar de console, precies
+     * in de uren dat de cel onder de 15 % zit en er niets te missen valt.
+     *
+     * Dus wel opnieuw, maar over een minuut. Dat houdt de bedoeling overeind
+     * en maakt er een poging per minuut van in plaats van honderden per
+     * seconde. 0 is gereserveerd voor "niets te schrijven", dus die ene
+     * millis()-waarde per 49 dagen wordt 1. */
+    unsigned long opnieuw = millis() + ADV_RETRY_DELAY;
+    _adv_dirty_at = opnieuw ? opnieuw : 1;
+    return;
+  }
   File f = _fs->open(MMADV_FILE, "w");
   if (!f) return;
   uint32_t magic = MMADV_MAGIC;
@@ -3773,6 +3926,7 @@ static int findMonitor(const char *key) {
 
 static void saveMonitors() {
   if (!_fs) return;
+  if (!brn_allow_write("monitorlijst")) return;
   File f = _fs->open(MMMON_CFG_FILE, "w");
   if (!f) return;
   f.printf("{\"iv\":%u,\"m\":[", _mon_interval);
@@ -7072,6 +7226,18 @@ static void handleStatus(AsyncWebServerRequest *req) {
   // Truncation here would ship broken JSON, so clamp before appending.
   if (n < 0 || (size_t)n >= sizeof(body)) n = sizeof(body) - 1;
 
+  // Brownout-toestand mee naar de site: zo is op afstand te zien dat een node
+  // zijn instellingen niet meer wegschrijft, in plaats van het pas te merken
+  // als hij terugkomt zonder naam.
+  {
+    int bn = brn_fill_json(body + n, sizeof(body) - n);
+    if (bn > 0 && (size_t)(n + bn + 1) < sizeof(body)) {
+      n += bn;
+      body[n++] = ',';
+      body[n] = 0;
+    }
+  }
+
   snprintf(body + n, sizeof(body) - n,
     "\"mqtt\":{\"host\":\"%s\",\"port\":%u,\"user\":\"%s\",\"prefix\":\"%s\","
     "\"enabled\":%u,\"rx\":%u,\"st\":\"%s\",\"stats\":%u,\"pkt\":%u,\"drop\":%u,"
@@ -7494,24 +7660,68 @@ static bool skipInBackup(const char *name) {
          strcmp(name, MMNET_BOOT_FILE) == 0;
 }
 
-static bool writeBackupFile() {
-  if (!_fs) return false;
-  File out = _fs->open(BACKUP_FILE, "w");
-  if (!out) return false;
+/* Waar de sleutel staat. IdentityStore schrijft "%s/%s.id" met de map die
+ * main.cpp meegeeft, en dat is op dit platform "/identity". Deze constante
+ * staat hier zodat de backup kan CONTROLEREN of hij de sleutel te pakken
+ * heeft, in plaats van dat achteraf te moeten ontdekken. */
+#define IDENTITY_PATH  "/identity/_main.id"
 
-  out.print(BACKUP_MAGIC "-BACKUP 1\n");
+/* Loopt een map af en schrijft elk bestand als FILE-regel plus hexblokken.
+ *
+ * HET PAD WORDT HIER ZELF OPGEBOUWD en niet aan f.name() overgelaten. Dat is
+ * de hele les van 22 oktober: op deze Arduino-ESP32-kern geeft File::name()
+ * alleen de BASISNAAM terug (vfs_api.cpp: `return pathToFileName(path());`).
+ * De oude code plakte daar een schuine streep voor en noteerde dus
+ * `FILE /_main.id` voor een bestand dat op /identity/_main.id staat. Bij het
+ * terugzetten ontstond een nieuw bestand op een pad dat nergens gelezen
+ * wordt: de node hield zijn nieuwe sleutel, en in de dump stonden daarna
+ * twee _main.id-ingangen. Drie keer herhaald met drie nieuwe identiteiten
+ * voordat duidelijk was waar het zat.
+ *
+ * Een backup die er geldig uitziet en de sleutel NIET bevat, is erger dan
+ * geen backup: je merkt het pas op de dag dat je hem nodig hebt.
+ *
+ * Daarom drie dingen tegelijk, want wat werkt hangt af van het
+ * bestandssysteem eronder:
+ *   - f.path() als de kern hem invult (volledig pad);
+ *   - anders bouwen we `map + "/" + naam` zelf op;
+ *   - en mappen worden ingedoken. SPIFFS is plat en kent ze niet -- daar komt
+ *     /identity/_main.id als één naam uit de wortel -- maar LittleFS kent ze
+ *     wel, en dan is doorlopen de enige manier om erbij te komen.
+ */
+static void backupWalk(File &out, const char *dirpath, int depth,
+                       int *count, bool *have_id) {
+  if (depth > 3) return;                 // te diep, of een lus: stoppen
+  File dir = _fs->open(dirpath);
+  if (!dir) return;                      // map bestaat niet: niets te doen
 
-  File dir = _fs->open("/");
-  File f = dir.openNextFile();
   uint8_t buf[HEX_PER_LINE];
   char hex[HEX_PER_LINE * 2 + 2];
 
+  File f = dir.openNextFile();
   while (f) {
-    // f.name() returns with or without a leading slash depending on core version
-    String path = f.name();
+    const char *fp = f.path();
+    String path;
+    if (fp && *fp) {
+      path = String(fp);
+    } else {
+      const char *nm = f.name();
+      path = String(dirpath);
+      if (!path.endsWith("/")) path += "/";
+      path += (nm && *nm) ? nm : "?";
+    }
     if (!path.startsWith("/")) path = "/" + path;
 
-    if (!f.isDirectory() && !skipInBackup(path.c_str())) {
+    if (f.isDirectory()) {
+      /* Niet onszelf opnieuw indoken: een kern die de wortel als kind van de
+       * wortel teruggeeft, zou hier anders rondjes blijven draaien. */
+      if (path != String(dirpath) && path != "/") {
+        f.close();
+        backupWalk(out, path.c_str(), depth + 1, count, have_id);
+        f = dir.openNextFile();
+        continue;
+      }
+    } else if (!skipInBackup(path.c_str())) {
       out.printf("FILE %s %u\n", path.c_str(), (unsigned)f.size());
       int n;
       while ((n = f.read(buf, sizeof(buf))) > 0) {
@@ -7524,11 +7734,41 @@ static bool writeBackupFile() {
         hex[p] = 0;
         out.print(hex);
       }
+      (*count)++;
+      if (path == IDENTITY_PATH) *have_id = true;
     }
     f = dir.openNextFile();
   }
+}
+
+static bool writeBackupFile() {
+  if (!_fs) return false;
+  /* De grootste schrijfactie die deze node doet: het hele bestandssysteem in
+   * één bestand. Juist die mag niet halverwege afbreken, en hij vult ook nog
+   * eens de flash die een herstelpoging straks nodig heeft. */
+  if (!brn_allow_write("backup")) return false;
+  File out = _fs->open(BACKUP_FILE, "w");
+  if (!out) return false;
+
+  out.print(BACKUP_MAGIC "-BACKUP 1\n");
+
+  int count = 0;
+  bool have_id = false;
+  backupWalk(out, "/", 0, &count, &have_id);
+
   out.print("END\n");
   out.close();
+
+  /* Hard melden, niet stil doorgaan. Een dump zonder sleutel is precies wat
+   * ons dit gekost heeft, en de enige plek waar je dat nog goedkoop kunt
+   * ontdekken is hier -- niet maanden later bij een restore. */
+  if (have_id) {
+    Serial.printf("MeshManagerNet: backup geschreven, %d bestanden incl. %s\n",
+                  count, IDENTITY_PATH);
+  } else {
+    Serial.printf("MeshManagerNet: WAARSCHUWING -- backup (%d bestanden) bevat GEEN %s\n",
+                  count, IDENTITY_PATH);
+  }
   return true;
 }
 
@@ -7553,10 +7793,104 @@ static uint8_t hexVal(char c) {
   return 0xFF;
 }
 
-/* Reads the uploaded file back line by line and writes the files out. Only
- * once everything succeeded do we restart; if anything goes wrong the node is
- * still exactly as it was. */
+
+/* Maakt de bovenliggende mappen van `path` aan, voor zover het
+ * bestandssysteem die kent. Op SPIFFS is dit een lege handeling: dat is plat
+ * en "/identity/_main.id" is daar gewoon een naam met een schuine streep
+ * erin. Op LittleFS is het noodzakelijk -- daar mislukt open() op een pad
+ * waarvan de map niet bestaat, en dan zou een restore de sleutel stil laten
+ * vallen. Een mkdir die faalt omdat de map er al is, is geen fout. */
+static void makeParentDirs(const char *path) {
+  char tmp[80];
+  strncpy(tmp, path, sizeof(tmp) - 1);
+  tmp[sizeof(tmp) - 1] = 0;
+  for (char *p = tmp + 1; *p; p++) {
+    if (*p != '/') continue;
+    *p = 0;
+    if (tmp[1] && !_fs->exists(tmp)) _fs->mkdir(tmp);
+    *p = '/';
+  }
+}
+
+/* Het pad waaronder een FILE-regel werkelijk terechtkomt, inclusief de
+ * omlegging voor oude, kapotte backups. Zowel de voorcontrole als het
+ * schrijven gebruiken deze functie, zodat de twee niet uit elkaar kunnen
+ * lopen -- een voorcontrole die iets anders berekent dan het schrijven, is
+ * erger dan geen voorcontrole. */
+static void restoreTargetPath(const char *src, char *out, size_t max) {
+  /* OUDE BACKUPS REDDEN. Een bestand dat met de kapotte writer van voor
+   * 2.15.0 gemaakt is, draagt `FILE /_main.id` terwijl de sleutel op
+   * /identity/_main.id hoort. Zo'n bestand terugzetten zoals het er staat,
+   * levert precies de situatie op die wij op het dak hadden: een los
+   * /_main.id dat niemand leest, naast de sleutel die wel geladen wordt.
+   *
+   * Daarom gaat dit ene pad naar /identity/. EXACT dit pad, en met opzet
+   * niet de bredere regel "elk .id-bestand uit de wortel". Die bredere regel
+   * is geprobeerd en is fout: de zusterfirmware die hetzelfde dumpformaat
+   * gebruikt (de bureau-node) bewaart /room_id_0.id en /snode_id_0.id WEL in
+   * de wortel, met IdentityStore(fs, ""). Een brede omlegging zou die bij een
+   * restore naar /identity/ verplaatsen en de room-sleutels kwijtmaken --
+   * dezelfde fout nog eens, maar dan veroorzaakt door de reparatie. */
+  if (strcmp(src, "/_main.id") == 0) {
+    snprintf(out, max, "%s", IDENTITY_PATH);
+    return;
+  }
+  strncpy(out, src, max - 1);
+  out[max - 1] = 0;
+}
+
+/* Leest het herstelbestand één keer door ZONDER iets te schrijven, en zegt
+ * of de sleutel erin zit op het pad waar hij terecht zal komen.
+ *
+ * Dit kost een extra pass over een bestand van een paar kB, en dat is het
+ * waard. Een restore is onomkeerbaar; halverwege ontdekken dat de identiteit
+ * ontbreekt, is te laat. Beter hard weigeren met een leesbare reden dan
+ * stilzwijgend half herstellen -- dat laatste is hoe dit drie keer is
+ * misgegaan voordat iemand doorhad waar het zat. */
+static bool restoreHasIdentity(File &in) {
+  char line[HEX_PER_LINE * 2 + 8];
+  char dest[96];
+  bool found = false;
+  size_t start = in.position();
+
+  while (in.available()) {
+    size_t len = in.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[len] = 0;
+    if (len && line[len - 1] == '\r') line[--len] = 0;
+    if (strncmp(line, "FILE ", 5) != 0) continue;
+    char *sp = strrchr(line + 5, ' ');
+    if (!sp) continue;
+    *sp = 0;
+    restoreTargetPath(line + 5, dest, sizeof(dest));
+    if (strcmp(dest, IDENTITY_PATH) == 0) { found = true; break; }
+  }
+  in.seek(start);
+  return found;
+}
+
+/* Leest het geüploade bestand regel voor regel terug en schrijft de bestanden
+ * weg. Alleen als alles gelukt is, herstarten we.
+ *
+ * HIER STOND: "if anything goes wrong the node is still exactly as it was."
+ * Dat is niet waar, en zo'n geruststelling is gevaarlijker dan geen. Er is
+ * geen terugrol: wat vóór een fout is weggeschreven, BLIJFT weggeschreven.
+ * Breekt een restore halverwege af, dan staat de node met een half
+ * teruggezet bestandssysteem.
+ *
+ * Bewust niet opgelost met een tussenkopie: die vraagt juist de vrije flash
+ * die er bij een herstel niet is. Wat er wél tegen gedaan is, zit ervoor --
+ * weigeren bij een lege accu, en weigeren als de dump geen identiteit bevat
+ * (restoreHasIdentity()). Dat zijn de twee gevallen waarin halverwege
+ * stranden onherstelbaar was. */
 static bool applyRestore(char *err, size_t err_max) {
+  /* Een restore schrijft ELK bestand opnieuw, inclusief prefs.json. Dat is
+   * de gevaarlijkste reeks schrijfacties die deze node kent, dus onder de
+   * drempel gaat hij niet door -- met een reden die de gebruiker leest, want
+   * dit komt altijd van iemand die op Herstellen heeft geklikt. */
+  if (!brn_allow_write("restore")) {
+    snprintf(err, err_max, "accu te laag (%u%%), herstellen geweigerd", (unsigned)brn_pct());
+    return false;
+  }
   File in = _fs->open(RESTORE_FILE, "r");
   if (!in) { snprintf(err, err_max, "geen bestand ontvangen"); return false; }
 
@@ -7580,6 +7914,17 @@ static bool applyRestore(char *err, size_t err_max) {
     return false;
   }
 
+  /* Eerst kijken, dan pas schrijven. Zie restoreHasIdentity(). */
+  if (!restoreHasIdentity(in)) {
+    in.close();
+    snprintf(err, err_max,
+             "backup bevat geen %s -- niet teruggezet (zou de sleutel wissen)",
+             IDENTITY_PATH);
+    Serial.printf("MeshManagerNet: restore GEWEIGERD, geen %s in de dump\n",
+                  IDENTITY_PATH);
+    return false;
+  }
+
   File out;
   uint32_t remaining = 0;
   int files = 0;
@@ -7597,8 +7942,27 @@ static bool applyRestore(char *err, size_t err_max) {
       if (!sp) { in.close(); snprintf(err, err_max, "onleesbare regel"); return false; }
       *sp = 0;
       remaining = (uint32_t)atol(sp + 1);
-      out = _fs->open(line + 5, "w");
-      if (!out) { in.close(); snprintf(err, err_max, "kan %s niet schrijven", line + 5); return false; }
+
+      char dest[96];
+      restoreTargetPath(line + 5, dest, sizeof(dest));
+      if (strcmp(dest, line + 5) != 0) {
+        Serial.printf("MeshManagerNet: restore verlegt %s naar %s (oude backup)\n",
+                      line + 5, dest);
+      }
+
+      /* Mappen aanmaken voordat we erin schrijven; op een plat
+       * bestandssysteem doet dit niets. Zie makeParentDirs(). */
+      makeParentDirs(dest);
+
+      /* Eerst wissen, dan pas openen. Op SPIFFS truncate "w" een bestaand
+       * bestand wel, maar op een bestandssysteem dat dat niet doet -- of bij
+       * een pad dat net iets anders gespeld is -- blijft de oude inhoud
+       * staan. Een restore mag nooit iets half overschrijven; wat er stond is
+       * per definitie wat je kwijt wilde. */
+      if (_fs->exists(dest)) _fs->remove(dest);
+
+      out = _fs->open(dest, "w", true);
+      if (!out) { in.close(); snprintf(err, err_max, "kan %s niet schrijven", dest); return false; }
       files++;
     } else if (strncmp(line, "END", 3) == 0) {
       break;
@@ -7778,6 +8142,7 @@ static void fwFail(const char *step, const char *fmt, ...) {
 // The image now in the partition we are not running from, as far as we know.
 static void fwNoteOther(const char *ver, const char *slot) {
   if (!_fs) return;
+  if (!brn_allow_write("fw-notitie")) return;
   File f = _fs->open(FW_NOTE_FILE, "w");
   if (!f) return;
   f.printf("{\"ver\":\"%.*s\",\"slot\":\"%.*s\"}",
@@ -9687,6 +10052,102 @@ static void handleMqttCommand(const char *arg, char *reply) {
   }
 }
 
+
+/* 'fs ls' en 'fs rm <pad>' -- het bestandssysteem van een node op een dak
+ * bekijken en één bestand wissen, zonder flashen en zonder ladder.
+ *
+ * WAAROM DIT ER IS. De backupwriter schreef jarenlang het verkeerde pad voor
+ * alles wat in een submap staat (zie writeBackupFile()). Een node die met zo'n
+ * backup hersteld is, draagt nu een los /_main.id dat niets doet naast de
+ * echte sleutel op /identity/_main.id. Dat is precies het soort rommel waar
+ * je achteraf niet bij kunt: het staat een restore in de weg, het vult de
+ * flash, en de enige manier om het weg te krijgen was tot nu toe een
+ * formatteren -- wat de sleutel meeneemt.
+ *
+ * 'fs ls' staat erbij omdat 'fs rm' zonder kijken gokken is. De volledige
+ * lijst gaat ook naar de console; het antwoord op de mesh is wat er in 155
+ * tekens past.
+ *
+ * De beveiliging op /identity is geen formaliteit. Dat is de ene map waarin
+ * wissen onherstelbaar is: er is geen tweede kopie van een sleutelpaar.
+ * Daarom moet daar 'force' achter, zodat niemand hem per ongeluk in een
+ * reeks opruimcommando's meeneemt.
+ */
+static bool fsCommand(const char *arg, char *reply, size_t reply_max) {
+  if (!_fs) { snprintf(reply, reply_max, "Err - geen bestandssysteem"); return true; }
+  while (*arg == ' ') arg++;
+
+  if (*arg == 0 || strcmp(arg, "ls") == 0) {
+    File dir = _fs->open("/");
+    if (!dir) { snprintf(reply, reply_max, "Err - geen bestandssysteem"); return true; }
+    int n = 0;
+    size_t used = 0;
+    reply[0] = 0;
+    File f = dir.openNextFile();
+    while (f) {
+      if (!f.isDirectory()) {
+        const char *fp = f.path();
+        String p = (fp && *fp) ? String(fp) : String(f.name());
+        if (!p.startsWith("/")) p = "/" + p;
+        Serial.printf("  %-28s %u\n", p.c_str(), (unsigned)f.size());
+        n++;
+        // Zoveel namen als er passen; de rest telt alleen nog mee.
+        char item[64];
+        int il = snprintf(item, sizeof(item), "%s%s(%u)", used ? " " : "",
+                          p.c_str(), (unsigned)f.size());
+        if (il > 0 && used + (size_t)il < reply_max - 24) {
+          memcpy(reply + used, item, (size_t)il + 1);
+          used += (size_t)il;
+        }
+      }
+      f = dir.openNextFile();
+    }
+    if (n == 0) { snprintf(reply, reply_max, "leeg"); return true; }
+    snprintf(reply + used, reply_max - used, " [%d best.]", n);
+    return true;
+  }
+
+  if (strncmp(arg, "rm", 2) == 0 && (arg[2] == 0 || arg[2] == ' ')) {
+    const char *p = arg + 2;
+    while (*p == ' ') p++;
+    if (*p == 0) { snprintf(reply, reply_max, "fs rm <pad>  (pad zoals in 'fs ls', met schuine streep)"); return true; }
+
+    char path[80];
+    strncpy(path, p, sizeof(path) - 1);
+    path[sizeof(path) - 1] = 0;
+
+    // 'force' als laatste woord: alleen daarmee mag er in /identity gewist worden.
+    bool force = false;
+    char *sp = strrchr(path, ' ');
+    if (sp && strcmp(sp + 1, "force") == 0) { *sp = 0; force = true; }
+    while (*path && path[strlen(path) - 1] == ' ') path[strlen(path) - 1] = 0;
+
+    if (path[0] != '/') { snprintf(reply, reply_max, "Err - pad moet met / beginnen"); return true; }
+    if (!_fs->exists(path)) { snprintf(reply, reply_max, "Err - %s bestaat niet", path); return true; }
+
+    if (strncmp(path, "/identity", 9) == 0 && !force) {
+      snprintf(reply, reply_max,
+               "Err - %s is sleutelmateriaal; 'fs rm %s force' als je het echt bedoelt",
+               path, path);
+      return true;
+    }
+    /* Wissen is ook een schrijfactie naar flash, en op SPIFFS niet de
+     * goedkoopste. Bij een lege accu dus niet. */
+    if (!brn_allow_write("fs rm")) {
+      snprintf(reply, reply_max, "Err - accu %u%% (%umV), wissen geweigerd",
+               (unsigned)brn_pct(), (unsigned)brn_mv());
+      return true;
+    }
+    bool ok = _fs->remove(path);
+    Serial.printf("MeshManagerNet: 'fs rm %s' -> %s\n", path, ok ? "gewist" : "MISLUKT");
+    snprintf(reply, reply_max, ok ? "OK - %s gewist" : "Err - %s wissen mislukt", path);
+    return true;
+  }
+
+  snprintf(reply, reply_max, "Err - fs [ls|rm <pad> [force]]");
+  return true;
+}
+
 // -------------------------------------------------------------------- public
 
 bool mmnet_is_safe_mode() { return _safe_mode; }
@@ -9701,6 +10162,12 @@ bool mmnet_handle_command(const char *command, char *reply) {
   /* Wake-on-LAN. Hier zodat het over de mesh-CLI, de console op poort 23 en
    * de beheerpagina allemaal hetzelfde commando is. */
   if (wol_handle_command(command, reply, 155)) return true;
+  /* 'brownout ...'. Om dezelfde reden als 'filter ...' bewust NIET achter
+   * 'wifi': dit heeft niets met het netwerk te maken en moet bereikbaar zijn
+   * langs de weg die als laatste wegvalt. Een node die zichzelf in slaap
+   * heeft gelegd en waarvan je de drempel alleen via de webpagina kunt
+   * bijstellen, is een node die je kwijt bent. */
+  if (brn_handle_command(command, reply, 155)) return true;
 
   if (memcmp(command, "wifi", 4) != 0) {
     /* Both versions in one line: this module and the MeshCore release it is
@@ -9738,6 +10205,12 @@ bool mmnet_handle_command(const char *command, char *reply) {
     if (memcmp(command, "filter", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
       return pf_command(command + 6, reply, 155);
     }
+    /* 'fs ls' / 'fs rm <pad>'. Om dezelfde reden hier en niet achter 'wifi':
+     * dit moet werken langs de weg die als laatste wegvalt, en het is juist
+     * nodig op een node waar iets mis is gegaan. */
+    if (memcmp(command, "fs", 2) == 0 && (command[2] == 0 || command[2] == ' ')) {
+      return fsCommand(command + 2, reply, 155);
+    }
     if (memcmp(command, "start ota", 9) == 0) {
       if (_asleep) {
         strcpy(reply, "WiFi staat uit (zuinig). Eerst 'wifi on 30'.");
@@ -9746,6 +10219,11 @@ bool mmnet_handle_command(const char *command, char *reply) {
       _server.end();
       _console.end();
       _started = false;          // stop serving from our own loop
+      /* Vanaf hier draait mmnet_loop() niet meer, dus de rem hierboven wordt
+       * ook niet meer gezet. Hem hier vastzetten: er staat iemand te flashen,
+       * en in slaap vallen midden in een OTA is hoe je een node op een dak
+       * kwijtraakt. */
+      brn_set_inhibit(true);
       if (!board.startOTAUpdate(_mesh ? _mesh->getNodeName() : "repeater", reply)) {
         strcpy(reply, "Err - OTA niet beschikbaar in deze build");
       }
@@ -9760,12 +10238,17 @@ bool mmnet_handle_command(const char *command, char *reply) {
 
   if (*arg == 0) {
     IPAddress ip = (_state == WIFI_FALLBACK_AP) ? WiFi.softAPIP() : WiFi.localIP();
-    char batt[24];
-    if (_batt_known) snprintf(batt, sizeof(batt), "%u%%", (unsigned)_batt_pct);
+    char batt[32];
+    /* Spanning erbij, niet alleen procenten. Het percentage komt uit een
+     * curve en een curve kan verkeerd staan; de millivolts zijn gemeten. Bij
+     * de volgende keer dat iemand "4 %" niet vertrouwt, staat het getal
+     * waarmee hij dat kan nakijken er meteen naast. */
+    if (_batt_known) snprintf(batt, sizeof(batt), "%u%% (%umV)", (unsigned)_batt_pct, (unsigned)_batt_mv);
     else strcpy(batt, "onbekend");
-    snprintf(reply, 155, "%s, ssid=%.20s, ip=%s, rssi=%d, accu=%s, elke %us",
+    snprintf(reply, 155, "%s, ssid=%.20s, ip=%s, rssi=%d, accu=%s%s, elke %us",
              stateNameNl(), _state == WIFI_FALLBACK_AP ? _ap_ssid : _cfg.ssid,
              ip.toString().c_str(), (int)WiFi.RSSI(), batt,
+             brn_write_blocked() ? ", SCHRIJVEN GEBLOKKEERD" : "",
              (unsigned)currentIntervalSecs());
   } else if ((v = subArg(arg, "ssid")) != NULL) {
     strncpy(_cfg.ssid, v, SSID_MAX - 1);
@@ -9935,6 +10418,7 @@ void mmnet_begin(FS &fs, MyMesh *mesh) {
       static File up;
       if (index == 0) {
         if (!requireAuth(req)) return;
+        if (!brn_allow_write("restore-upload")) { up = File(); return; }
         up = _fs->open(RESTORE_FILE, "w");
       }
       if (up) up.write(data, len);
@@ -9993,6 +10477,23 @@ void mmnet_loop() {
 
   // Same lazy write for the filter rules, and for the same reason: SPIFFS wears.
   pf_loop();
+
+  /* Brownout-bewaking. Meet hoogstens eens per tien seconden en blokkeert
+   * nooit; alles daarboven staat met opzet NA deze regel, zodat een node die
+   * besluit te gaan slapen dat doet voordat hij nog een ronde WiFi, MQTT en
+   * monitorwerk begint.
+   *
+   * brn_set_inhibit() is de rem: zolang iemand met de node bezig is -- 'wifi
+   * on <min>', een firmware-upload, een herstart die al gepland staat -- gaat
+   * hij niet slapen, wat de cel ook zegt. Buitengesloten worden kost meer dan
+   * de lading. Het is geen schakelaar maar een toestand, dus elke ronde
+   * opnieuw gezet.
+   *
+   * Alleen de REM staat hier; brn_loop() zelf draait in main.cpp. Deze
+   * functie keert hierboven al terug als de module nog niet gestart is of
+   * zichzelf heeft uitgeschakeld, en juist een node die zes keer slecht is
+   * opgestart mag zijn brownout-bewaking niet kwijt zijn. */
+  brn_set_inhibit(isForced() || _fw.active || _reboot_pending);
 
   if (_apply_wifi) {
     _apply_wifi = false;

@@ -745,10 +745,21 @@ index c93ba1a4..8a8121ba 100644
    if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
      char* hex = &command[8];
 diff --git a/examples/simple_repeater/MyMesh.h b/examples/simple_repeater/MyMesh.h
-index 2f923c87..2556a349 100644
+index 2f923c87..cce55236 100644
 --- a/examples/simple_repeater/MyMesh.h
 +++ b/examples/simple_repeater/MyMesh.h
-@@ -67,8 +67,41 @@ struct NeighbourInfo {
+@@ -14,6 +14,10 @@
+   using File = fs::File;
+ #endif
+ 
++#ifdef MESHMANAGER_NET
++  #include "BrownOut.h"
++#endif
++
+ #ifdef WITH_RS232_BRIDGE
+ #include "helpers/bridges/RS232Bridge.h"
+ #define WITH_BRIDGE
+@@ -67,8 +71,41 @@ struct NeighbourInfo {
    uint32_t advert_timestamp;
    uint32_t heard_timestamp;
    int8_t snr; // multiplied by 4, user should divide to get float value
@@ -756,8 +767,8 @@ index 2f923c87..2556a349 100644
 +   * you can actually recognise; a bare pub_key prefix is not something a human
 +   * picks from. */
 +  char name[MAX_ADVERT_DATA_SIZE];
- };
- 
++};
++
 +#ifndef MAX_MONITORS
 +  #define MAX_MONITORS 8
 +#endif
@@ -771,8 +782,8 @@ index 2f923c87..2556a349 100644
 +  uint8_t shared_secret[PUB_KEY_SIZE];
 +  uint8_t out_path[MAX_PATH_SIZE];
 +  uint8_t out_path_len;
-+};
-+
+ };
+ 
 +/* Peer indexes passed to getPeerSharedSecret()/onPeerDataRecv() are ACL
 + * indexes. Monitor entries ride the same dispatch with their index offset by
 + * this base, so replies from them arrive without a second mechanism. */
@@ -790,7 +801,7 @@ index 2f923c87..2556a349 100644
  #ifndef FIRMWARE_BUILD_DATE
    #define FIRMWARE_BUILD_DATE   "9 Aug 2026"
  #endif
-@@ -112,14 +145,19 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
+@@ -112,14 +149,19 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
    float pending_bw;
    uint8_t pending_sf;
    uint8_t pending_cr;
@@ -812,7 +823,7 @@ index 2f923c87..2556a349 100644
    uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
    uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
    uint8_t handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
-@@ -191,6 +229,28 @@ public:
+@@ -191,7 +233,40 @@ public:
      return &_prefs;
    }
  
@@ -839,9 +850,21 @@ index 2f923c87..2556a349 100644
 +  bool  ohSendAlert(const uint8_t* pfx, int plen, const char* tekst);
 +
    void savePrefs() override {
++#ifdef MESHMANAGER_NET
++    /* VIERDE HAAK in dit upstream-bestand, en de belangrijkste.
++     *
++     * Dit is letterlijk de schrijfactie die de dakrepeater gesloopt heeft.
++     * CommonCLI::savePrefs() wist /prefs.json en schrijft het daarna opnieuw;
++     * valt de voeding daartussen weg, dan is de naam weg en het admin-
++     * wachtwoord met hem -- precies wat wij hebben zien gebeuren. Bij een
++     * lege cel beginnen we er dus niet meer aan. De waarden blijven gewoon in
++     * RAM staan en werken verder; alleen het wegschrijven wacht op stroom. */
++    if (!brn_allow_write("prefs")) return;
++#endif
      _cli.savePrefs(_fs);
    }
-@@ -229,6 +289,61 @@ public:
+ 
+@@ -229,6 +304,61 @@ public:
    void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
    void loop();
  
@@ -904,10 +927,10 @@ index 2f923c87..2556a349 100644
    void setBridgeState(bool enable) override {
      if (enable == bridge.isRunning()) return;
 diff --git a/examples/simple_repeater/main.cpp b/examples/simple_repeater/main.cpp
-index a714db68..9a75a717 100644
+index a714db68..f3aa7ed0 100644
 --- a/examples/simple_repeater/main.cpp
 +++ b/examples/simple_repeater/main.cpp
-@@ -13,6 +13,12 @@
+@@ -13,6 +13,32 @@
    #include <helpers/nrf52/EthernetCLI.h>
  #endif
  
@@ -915,12 +938,32 @@ index a714db68..9a75a717 100644
 +  #include "MeshManagerNet.h"
 +#include "OpenHopBridge.h"
 +#include "WolCmd.h"
++#include "BrownOut.h"
++
++/* De twee haken waarmee de brownout-module aan dit bord hangt. Ze staan hier
++ * en niet in BrownOut.cpp zodat die module bordonafhankelijk blijft en
++ * ongewijzigd op de bureau-node kan draaien. */
++static uint16_t brnReadMv() { return board.getBattMilliVolts(); }
++
++#if defined(ESP32)
++/* Deep sleep MET wektimer, NIET board.powerOff().
++ *
++ * powerOff() is enterDeepSleep(0): slapen zonder wekbron, dus wakker worden
++ * kan alleen met de resetknop. Voor een node op een dak is dat hetzelfde als
++ * stuk. Met een timer komt hij er vanzelf uit, meet opnieuw, en blijft op
++ * zodra het paneel weer levert. Op ESP32 is wakker worden uit deep sleep een
++ * volledige herstart, dus hij komt terug langs de gewone setup() -- er is
++ * geen halfwakkere toestand om te onderhouden.
++ *
++ * Keert niet terug. */
++static void brnDeepSleep(uint32_t secs) { board.enterDeepSleep(secs); }
++#endif
 +#endif
 +
  StdRNG fast_rng;
  SimpleMeshTables tables;
  
-@@ -60,9 +66,14 @@ void setup() {
+@@ -60,9 +86,14 @@ void setup() {
    }
  #endif
  
@@ -936,7 +979,48 @@ index a714db68..9a75a717 100644
    }
  
    fast_rng.begin(radio_driver.getRngSeed());
-@@ -102,10 +113,27 @@ void setup() {
+@@ -84,7 +115,40 @@ void setup() {
+ #else
+   #error "need to define filesystem"
+ #endif
++#ifdef MESHMANAGER_NET
++  /* Zo vroeg mogelijk, en met opzet VOOR de eerste schrijfactie naar flash.
++   * De radio staat hier nog uit en WiFi is nog niet begonnen, dus dit is de
++   * rustigste accumeting die deze node vandaag doet. Daarmee staat de
++   * beslissing "mag er geschreven worden" vast voordat er iets opengaat. */
++  #if defined(ESP32)
++    brn_begin(*fs, brnReadMv, NULL, brnDeepSleep);
++  #else
++    brn_begin(*fs, brnReadMv, NULL, NULL);   // geen deep sleep: alleen melden
++  #endif
++#endif
++
+   if (!store.load("_main", the_mesh.self_id)) {
++#ifdef MESHMANAGER_NET
++    /* De identiteit is heilig, en dit is het ene pad waarop hij vanzelf
++     * vervangen wordt. Lukt het laden niet terwijl de cel bijna leeg is, dan
++     * is de kans groot dat het bestandssysteem beschadigd is door precies de
++     * brownout die we aan het bestrijden zijn -- en dan is een NIEUWE sleutel
++     * maken en wegschrijven het slechtste wat we kunnen doen: de node komt
++     * terug als een vreemde, en de oude sleutel is definitief weg.
++     *
++     * Dus: niet genereren, gaan slapen, en het later opnieuw proberen met een
++     * volle accu. Misschien laadt /identity dan gewoon. Is hij echt stuk, dan
++     * maakt hij alsnog een nieuwe -- maar dan wel met stroom genoeg om hem
++     * ook heel weg te schrijven. */
++    if (brn_write_blocked()) {
++      Serial.printf("Geen identiteit en accu %u%% (%u mV): GEEN nieuwe sleutel maken, "
++                    "eerst opladen.\n", (unsigned)brn_pct(), (unsigned)brn_mv());
++      Serial.flush();
++      #if defined(ESP32)
++        board.enterDeepSleep((uint32_t)brn_wake_min() * 60UL);   // keert niet terug
++      #endif
++    }
++#endif
+     MESH_DEBUG_PRINTLN("Generating new keypair");
+     the_mesh.self_id = radio_new_identity();   // create new random identity
+     int count = 0;
+@@ -102,10 +166,27 @@ void setup() {
    ethernet_command[0] = 0;
  #endif
  
@@ -964,13 +1048,19 @@ index a714db68..9a75a717 100644
  #ifdef DISPLAY_CLASS
    ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
  #endif
-@@ -170,6 +198,11 @@ void loop() {
+@@ -170,6 +251,17 @@ void loop() {
    }
  #endif
  
 +#ifdef MESHMANAGER_NET
 +  mmnet_loop();   // wifi, beheerpagina en console; blokkeert nooit
 +  ohb_loop();     // openHop-brug: begrensde hap per ronde
++  /* Brownout-bewaking: hoogstens een meting per tien seconden, blokkeert
++   * nooit. Hier en niet in mmnet_loop(), want die keert vroegtijdig terug
++   * zodra de module nog niet gestart is, een OTA heeft overgenomen of
++   * zichzelf na zes slechte starts heeft uitgeschakeld -- en dat is nu juist
++   * de node die de bescherming het hardst nodig heeft. */
++  brn_loop();
 +#endif
 +
  #if defined(PIN_USER_BTN) && defined(_SEEED_SENSECAP_SOLAR_H_) && !defined(DISPLAY_CLASS)

@@ -1,4 +1,5 @@
 #include "PacketFilter.h"
+#include "BrownOut.h"
 
 /* Utils.h en niet alleen MeshCore.h: de constanten (CIPHER_BLOCK_SIZE,
  * CIPHER_MAC_SIZE) komen uit MeshCore.h, maar mesh::Utils::sha256 -- waarmee
@@ -166,6 +167,12 @@ static void pfClearCounters() {
  * is not close. */
 static void pfSave() {
   if (!_pf_fs) return;
+  /* Precies de reden dat pfSave() het bestand als laatste 'on' schrijft, is
+   * dat een brownout halverwege hier al verwacht werd ("op een zonnenode een
+   * dinsdag"). Dat vangnet blijft staan, maar we beginnen er nu niet meer aan
+   * als de cel laag staat. De dirty-vlag blijft staan, dus pf_loop() probeert
+   * het later opnieuw. */
+  if (!brn_allow_write("filterregels")) return;
   File f = _pf_fs->open(PF_FILE, "w");
   if (!f) return;
   f.printf("# MeshManager pakketfilter -- regels zoals 'filter <regel>'\n");

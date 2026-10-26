@@ -3,6 +3,17 @@
 De volledige toelichting per versie staat in de kop van
 `src/MeshManagerNet.cpp`; dit is de korte lijst.
 
+- **2.15.1** - De advert-cache probeerde zichzelf stuk te schrijven: een door de
+  brownout-poort geweigerde write liet de dirty-vlag op een verstreken moment
+  staan, dus bood de hoofdlus hem elke ronde opnieuw aan. 2.208.739 weigeringen
+  in twee nachten, precies onder de 15 %.
+- **2.15.0** - De backup wees naar de verkeerde plek: `f.name()` geeft op
+  arduino-esp32 alleen de basisnaam, dus `/identity/_main.id` werd `/_main.id`
+  en een herstel schreef de sleutel waar niemand hem leest. Plus `fs ls`/`fs rm`.
+- **2.14.0** - Brownout-bescherming: onder 15 % geen niet-essentiele writes meer,
+  onder 10 % deep sleep MET wektimer (nooit powerOff: dat vraagt een ladder), en
+  een echte 1S-LiPo-curve in plaats van de lineaire 3000..4200 mV die bij 3600 mV
+  nog 50 % beweerde terwijl de cel op ~9 % stond.
 - **2.13.0** - Wake-on-LAN: een pc wekken vanaf de mesh (`wol`, plus webpaneel)
 - **2.12.1** - De hoofdlus wacht nooit meer op de socket (MSG_DONTWAIT)
 - **2.12.0** - Verbonden is niet hetzelfde als repeterend: failover op zendverzoeken
